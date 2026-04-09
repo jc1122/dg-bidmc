@@ -1,0 +1,124 @@
+{
+  "composite": 0.780681631464242,
+  "n_sentences": 30,
+  "method": "DG-Enhanced-v5-ensemble",
+  "conditions": {
+    "baseline_20dB": {
+      "boundary_f1": 0.9696741854636592
+    },
+    "white_snr20": {
+      "boundary_f1": 0.9696741854636592
+    },
+    "white_snr10": {
+      "boundary_f1": 0.9834586466165415
+    },
+    "white_snr5": {
+      "boundary_f1": 0.9781954887218045
+    },
+    "white_snr0": {
+      "boundary_f1": 0.9553049289891397
+    },
+    "pink_snr20": {
+      "boundary_f1": 0.9659704817599555
+    },
+    "pink_snr10": {
+      "boundary_f1": 0.8356530214424952
+    },
+    "pink_snr5": {
+      "boundary_f1": 0.7856001113895851
+    },
+    "pink_snr0": {
+      "boundary_f1": 0.5633036459163396
+    },
+    "brown_snr20": {
+      "boundary_f1": 0.930576441102757
+    },
+    "brown_snr10": {
+      "boundary_f1": 0.8162628794207742
+    },
+    "brown_snr5": {
+      "boundary_f1": 0.6991095162147795
+    },
+    "brown_snr0": {
+      "boundary_f1": 0.5435449735449736
+    },
+    "burst_snr20": {
+      "boundary_f1": 0.8854149262043999
+    },
+    "burst_snr10": {
+      "boundary_f1": 0.9042213376578702
+    },
+    "burst_snr5": {
+      "boundary_f1": 0.9042213376578702
+    },
+    "burst_snr0": {
+      "boundary_f1": 0.9042213376578702
+    },
+    "bandlimited_snr20": {
+      "boundary_f1": 0.9218045112781954
+    },
+    "bandlimited_snr10": {
+      "boundary_f1": 0.8517014759120024
+    },
+    "bandlimited_snr5": {
+      "boundary_f1": 0.6405065110328267
+    },
+    "bandlimited_snr0": {
+      "boundary_f1": 0.4628977428008759
+    },
+    "dc_drift_0.0005": {
+      "boundary_f1": 0.7389863547758284
+    },
+    "dc_drift_0.001": {
+      "boundary_f1": 0.8961292119186856
+    },
+    "dc_drift_0.002": {
+      "boundary_f1": 0.9199387357282094
+    },
+    "dc_drift_0.005": {
+      "boundary_f1": 0.9199387357282094
+    },
+    "harmonics_clean": {
+      "boundary_f1": 0.6992794337622714
+    },
+    "harmonics_20dB": {
+      "boundary_f1": 0.6568513400321182
+    },
+    "harmonics_10dB": {
+      "boundary_f1": 0.6771350972952804
+    },
+    "varamp_0.1_5.0": {
+      "boundary_f1": 0.921219715956558
+    },
+    "varamp_0.05_10.0": {
+      "boundary_f1": 0.9194653299916457
+    },
+    "short_d50_150": {
+      "boundary_f1": 0.9714809081527348
+    },
+    "short_d20_80": {
+      "boundary_f1": 0.6171395271395271
+    },
+    "ratio_5x": {
+      "boundary_f1": 0.6338095238095237
+    },
+    "ratio_10x": {
+      "boundary_f1": 0.5326984126984128
+    },
+    "ratio_20x": {
+      "boundary_f1": 0.6071428571428572
+    },
+    "ratio_40x": {
+      "boundary_f1": 0.7571428571428573
+    },
+    "compound_mild": {
+      "boundary_f1": 0.5662794639606233
+    },
+    "compound_severe": {
+      "boundary_f1": 0.4921264659412602
+    },
+    "compound_extreme": {
+      "boundary_f1": 0.44850196968045936
+    }
+  }
+}
