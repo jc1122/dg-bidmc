@@ -22,7 +22,7 @@ def build_graph(signal: np.ndarray):
     import degreegraph
     from motifs import EdgeGraph
 
-    x64 = np.asarray(signal, dtype=np.float64)
+    x64 = np.ascontiguousarray(signal, dtype=np.float64)
     indices, is_lows, offsets, connections = degreegraph.compute_arrays(x64, x64)
     graph = EdgeGraph.from_degreegraph2(indices, is_lows, offsets, connections, x64)
     return graph

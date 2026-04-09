@@ -451,6 +451,14 @@ dg_bidmc/
    signals before calling `build_graph()`; this reduces zero-crossing density dramatically
 7. **torch_geometric not installed on Aorus** by default — may need `pip install torch_geometric`
    in the Ray venv (not the system Python)
+8. **GATConv must use `add_self_loops=False` on Aorus GPU** — the RX 5700 XT (gfx1010) custom
+   ROCm torch build lacks a compiled kernel for `torch.nonzero()` on GPU; GATConv's default
+   `add_self_loops=True` internally calls `remove_self_loops` which uses boolean tensor indexing
+   → `hipErrorInvalidDeviceFunction`. Since DG graphs are DAGs with no self-loops, setting
+   `add_self_loops=False` is both correct and avoids the broken code path.
+9. **`build_graph()` requires C-contiguous float64 input** — `scipy.signal.filtfilt()` output is
+   not C-contiguous. Always use `np.ascontiguousarray(signal, dtype=np.float64)` before passing
+   to `degreegraph.compute_arrays()` or `build_graph()`.
 
 ---
 
