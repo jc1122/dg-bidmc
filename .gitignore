@@ -26,3 +26,6 @@ build/
 # Misc
 *.log
 .DS_Store
+
+# metaopt campaign state (ephemeral, not versioned)
+.ml-metaopt/
