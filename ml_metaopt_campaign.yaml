@@ -1,97 +1,117 @@
 version: 3
-campaign_id: dg-gat-respiratory-v1
+campaign_id: dg-gat-respiratory-v2
 goal: >
-  Train a DG-GAT model to detect inhale/exhale trough boundaries in ICU impedance
-  pneumography signals, beating the implied SOTA (Charlton SQI F1 ≈ 0.800 on quality
-  segments) whole-signal across all adversarial conditions in the BIDMC dataset.
+  Find the best DG-based graph neural network for detecting inhale/exhale trough
+  boundaries in ICU impedance pneumography (BIDMC, 125 Hz). Jointly optimize over
+  graph construction variants, motifs feature sets, network topology, and training
+  hyperparameters. Primary target: boundary F1 @±600ms ≥ 0.95. Secondary: respiratory
+  rate MAE ≤ 1.0 bpm (to compare against RRest SOTA of 0.21–0.40 bpm from Charlton 2021).
 
-# ────────────────────────────────────────────────────────────────
-# Objective
-# Primary metric: boundary F1 at ±600 ms tolerance (75 samples @ 125 Hz)
-# No published per-breath F1 benchmark exists for this protocol.
-# SOTA reference: Charlton 2021 SQI peak-detection → sensitivity 77.7% /
-# specificity 82.3% → implied F1 ≈ 0.800 (quality segments only, BIDMC).
-# Stop when DG-GAT beats this whole-signal (F1 ≥ 0.82).
-# ────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
+# SOTA reference points (from literature survey, 2024-04):
+#
+# Task: per-breath boundary detection on BIDMC impedance pneumography
+# No published per-breath F1 benchmark exists for this exact protocol.
+# Closest published figures:
+#   - Charlton 2021 (IP SQI, BIDMC, quality-filtered segments):
+#       sensitivity 77.7%, specificity 82.3% → implied F1 ≈ 0.800
+#   - Peak detection (supine ICU, unfiltered):
+#       MAE 0.47–1.23 bpm
+#   - DG-v5 zero-shot (our measured baseline):
+#       boundary F1 @600ms = 0.322, adversarial patients ≈ 0.261
+#   - WaveletDenoise (best published zero-shot):
+#       boundary F1 @600ms = 0.291
+#
+# For rate estimation (SOTA to beat on secondary metric):
+#   - RRest SQI best: MAE 0.21–0.40 bpm (quality segments only)
+#   - PPG2RespNet 2024: MAE 0.69 bpm (from PPG, different signal)
+#   - Deep learning on IP: MAE ~1.9–2.0 bpm (typical)
+#   Target: MAE ≤ 1.0 bpm whole-signal (beat deep learning SOTA on IP)
+# ──────────────────────────────────────────────────────────────────────────────
+
 objective:
   metric: boundary_f1_600ms
   direction: maximize
   aggregation:
     method: weighted_mean
     weights:
-      bidmc_val: 0.7
-      bidmc_val_adversarial: 0.3
-  improvement_threshold: 0.005   # treat Δ < 0.005 as noise
+      bidmc_val: 0.55
+      bidmc_val_adversarial: 0.45    # weight adversarial heavily — DG's main differentiator
+  improvement_threshold: 0.003
 
-# ────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
 # Datasets
-# Populated after Phase 1 data preparation (data_loader.py).
-# fingerprint: sha256 of the .pt cache directory (compute with
-#   find data/graphs/{split}/ -name "*.pt" -print0 | sort -z |
-#   xargs -0 sha256sum | sha256sum
-# )
-# ────────────────────────────────────────────────────────────────
+# Split: 35 train / 8 val / 10 test (stratified by adversarial profile)
+# Val adversarial = val patients with drift_severity > 0.10 OR
+#                   irregularity_cv > 0.15 OR sigh_rate > 0.10
+#
+# fingerprint: sha256 computed over sorted file list after Phase 1 data prep:
+#   find data/graphs/{val,val_adversarial}/ -name "*.pt" -print0 |
+#   sort -z | xargs -0 sha256sum | sha256sum
+#
+# PLACEHOLDER fingerprints must be replaced after data_loader.py runs.
+# ──────────────────────────────────────────────────────────────────────────────
 datasets:
   - id: bidmc_val
     local_path: data/graphs/val/
     role: train_eval
     fingerprint: sha256:0000000000000000000000000000000000000000000000000000000000000001
-    # REPLACE with: sha256 of val .pt cache after Phase 1
+    # TODO Phase 1: recompute sha256 after data/graphs/val/ cache is built
 
   - id: bidmc_val_adversarial
     local_path: data/graphs/val_adversarial/
     role: eval_only
     fingerprint: sha256:0000000000000000000000000000000000000000000000000000000000000002
-    # REPLACE with: sha256 of val_adversarial subset (drift/sigh/irregular patients)
-    # Subset of val: patients with drift_severity > 0.10 OR sigh_rate > 0.10 OR irregularity_cv > 0.15
+    # TODO Phase 1: recompute sha256 after data/graphs/val_adversarial/ is built
 
-  # Training data is referenced only via the entrypoint script (not listed here
-  # as a dataset because the runner manages its own train split loading).
-
-# ────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
 # Baseline
-# Measured zero-shot DG-v5: F1 = 0.322 @ ±600ms across 5 patients.
-# Update these after first DG-GAT training run in Phase 1.
-# ────────────────────────────────────────────────────────────────
+# Current best measured on 5-patient zero-shot eval (results/real_data_respiratory.json):
+#   DG-v5: F1 = 0.322 (aggregate of clean, drift, sigh, irregular patients)
+# TODO Phase 1: replace with val-set F1 from first trained DG-GAT run.
+# ──────────────────────────────────────────────────────────────────────────────
 baseline:
   aggregate: 0.322
   by_dataset:
     bidmc_val: 0.322
-    bidmc_val_adversarial: 0.290    # conservative estimate (drift/sigh patients worse)
-  # TODO: after Phase 1 — replace with measured val F1 from first DG-GAT run
+    bidmc_val_adversarial: 0.275    # estimated (irregular/burst patients in zero-shot eval)
+  # TODO after first training run: update with actual val F1
 
-# ────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
 # Stop conditions
-# target_metric = 0.82 → beats Charlton's SQI whole-signal (implied SOTA F1 ≈ 0.80)
-# max_iterations: 30 (Optuna TPE needs ~30 for 9-dim search space to converge)
-# max_no_improve_iterations: 5 (early stop if stuck)
-# ────────────────────────────────────────────────────────────────
+# target_metric = 0.95 — beats all known SOTA by a wide margin.
+# Note: annotation-quality ceiling estimated at ~0.85–0.90 from RESEARCH_PLAN.md;
+# 0.95 may require ensemble or post-processing strategies discovered during campaign.
+# max_iterations = 60 — generous for full joint search (arch + features + hyperparams)
+# max_no_improve = 8 — allow TPE to explore before concluding (large search space)
+# ──────────────────────────────────────────────────────────────────────────────
 stop_conditions:
-  max_iterations: 30
-  max_no_improve_iterations: 5
-  target_metric: 0.82
-  max_wallclock_hours: 96
+  max_iterations: 60
+  max_no_improve_iterations: 8
+  target_metric: 0.95
+  max_wallclock_hours: 168           # 1 week
 
 proposal_policy:
   current_target: 6
   current_floor: 3
-  next_cap: 100
+  next_cap: 150
   distinctness_rule: non_overlapping
 
 dispatch_policy:
-  background_slots: 4    # Aorus has 1 GPU — keep concurrency low
+  background_slots: 4
   auxiliary_slots: 2
 
-# ────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
 # Sanity check
-# scripts/local_sanity.py: 1 patient, build DG graph, model forward pass
-# Must complete in < 60s; checks:
-#   1. wfdb loads bidmc01 OK
-#   2. build_graph() succeeds
-#   3. PyG Data object constructed
-#   4. DGGAT forward pass on CPU
-#   5. boundary_f1() callable
-# ────────────────────────────────────────────────────────────────
+# scripts/local_sanity.py --fast:
+#   1. Load bidmc01 via wfdb
+#   2. LP-filter, build DG graph (2 variants: standard + trough-emphasis)
+#   3. Extract full feature set (all motifs metrics enabled)
+#   4. Construct PyG Data object
+#   5. Forward pass through all supported arch types (GAT, GCN, SAGE, GIN)
+#   6. Call boundary_f1() with dummy predictions
+#   7. Print sizes and pass/fail — must complete in < 60s
+# ──────────────────────────────────────────────────────────────────────────────
 sanity:
   command: python3 /root/dg_bidmc/scripts/local_sanity.py --fast
   max_duration_seconds: 60
@@ -102,14 +122,14 @@ artifacts:
   code_roots:
     - .
   data_roots:
-    - data
+    - data/graphs
   exclude:
     - .git
     - .venv
     - .ml-metaopt
     - __pycache__
     - "*.pyc"
-    - "data/raw/"          # raw BIDMC wfdb files — large, re-downloaded on demand
+    - data/raw            # raw BIDMC wfdb files — re-downloaded on demand by wfdb
 
 remote_queue:
   backend: ray-hetzner
@@ -119,29 +139,121 @@ remote_queue:
   status_command: python3 /opt/ray-hetzner/metaopt/get_batch_status.py --batch-id
   results_command: python3 /opt/ray-hetzner/metaopt/fetch_batch_results.py --batch-id
 
-# ────────────────────────────────────────────────────────────────
+# ──────────────────────────────────────────────────────────────────────────────
 # Execution
-# ray_runner.py reads hyperparameters from env var METAOPT_TRIAL_CONFIG (JSON).
-# Returns a JSON result file at the path in env var METAOPT_RESULT_PATH.
-# Hyperparameter search space (Optuna TPE):
-#   hidden_dim:      categorical [32, 64, 128]
-#   n_heads:         categorical [4, 8]
-#   n_layers:        int [2, 4]
-#   dropout:         float [0.0, 0.25]
-#   lr:              log-uniform [5e-4, 5e-3]
-#   weight_decay:    log-uniform [1e-5, 1e-3]
-#   pos_weight:      float [4.0, 12.0]
-#   window_breaths:  categorical [4, 6, 8]
-#   augment:         categorical [none, drift, burst, both]
-#   tol_samples:     categorical [50, 75, 100]  (label assignment tolerance during training)
-# ────────────────────────────────────────────────────────────────
+#
+# runner: scripts/ray_runner.py
+#   - Reads METAOPT_TRIAL_CONFIG (JSON string in env) for hyperparameters
+#   - Trains one model configuration for max_epochs
+#   - Evaluates boundary F1 @600ms on val and val_adversarial splits
+#   - Also computes rate_mae_bpm (logged as secondary metric)
+#   - Writes JSON result to METAOPT_RESULT_PATH:
+#       {"boundary_f1_600ms": float, "rate_mae_bpm": float, "by_dataset": {...}}
+#   - CRITICAL: all GATConv/TransformerConv layers MUST use add_self_loops=False
+#     (gfx1010 torch.nonzero GPU kernel missing — see AGENTS.md pitfall 8)
+#
+# ──────────────────────────────────────────────────────────────────────────────
+# SEARCH SPACE (all fields passed in METAOPT_TRIAL_CONFIG JSON)
+#
+# ── Graph construction (highs/lows series to degreegraph.compute_arrays) ──
+#   graph_variant:
+#     "standard"         compute_arrays(sig_lp, sig_lp)          — symmetric
+#     "trough_emphasis"  compute_arrays(sig_1hz, sig_lp)         — smoothed highs → troughs dominate
+#     "peak_emphasis"    compute_arrays(sig_lp, sig_1hz)         — smoothed lows → peaks dominate
+#     "dual_res"         two graphs (1Hz + 2Hz) merged by bar proximity
+#
+#   lp_cutoff_hz:        [1.0, 1.5, 2.0, 2.5, 3.0]              — LP filter before DG
+#   n_levels:            [2, 3, 4]                                — KMeans clusters for level feature
+#   d_min_factor:        [0.40, 0.50, 0.55, 0.65, 0.70]         — D_MIN = factor × mean_half_period
+#   detrend:             ["none", "linear", "window_linear"]      — pre-DG detrending
+#   burst_suppress:      [true, false]                            — MAD clipping pre-DG
+#   wavelet_denoise:     [true, false]                            — VisuShrink wavelet pre-DG
+#
+# ── Node features (binary flags — which motifs metrics to include) ──
+#   Basic (always on):
+#     feat_bar_position          bar_position_norm ∈ [0,1]
+#     feat_log_edge_size         log(edge_size) normalized
+#     feat_is_low                node_is_low (1=trough, 0=peak)
+#
+#   Structural (from motifs EdgeGraph per-node):
+#     feat_amplitude:            [true, false]   signal amplitude z-scored
+#     feat_duration:             [true, false]   samples-to-next-node normalized
+#     feat_level:                [true, false]   KMeans level / (n_levels-1)
+#     feat_node_degree:          [true, false]   count of edges touching node
+#     feat_commitment_ratio:     [true, false]   structural_commitment_ratio (None→1.0)
+#     feat_run_asymmetry:        [true, false]   structural_run_asymmetry (None→0.0)
+#     feat_span_overlap:         [true, false]   structural_span_mean_overlap (None→0.0)
+#     feat_swing_velocity:       [true, false]   mean_swing_velocity (local window)
+#     feat_birth_rate:           [true, false]   c_birth_rate_mean (local window)
+#     feat_edge_size_ratio:      [true, false]   log_edge_size / window_mean (local context)
+#     feat_amplitude_delta:      [true, false]   amplitude difference from previous node
+#     feat_duration_ratio:       [true, false]   duration / window_median_duration
+#     feat_phase_estimate:       [true, false]   sin/cos of estimated phase in breath cycle
+#
+#   Note: in_dim is computed dynamically from enabled features (3 base + N optional)
+#
+# ── Edge features ──
+#   edge_feat_log_size:          [true, false]   log(edge_size) normalized (always recommended)
+#   edge_feat_direction_match:   [true, false]   src.is_low == dst.is_low
+#   edge_feat_direction:         [true, false]   absolute edge_direction (bool → float)
+#   edge_feat_duration_norm:     [true, false]   edge_duration / mean_duration
+#   edge_feat_amplitude_delta:   [true, false]   |amp[dst] - amp[src]| normalized
+#
+#   Note: edge_dim is computed dynamically from enabled edge features
+#
+# ── Network topology ──
+#   arch:
+#     "gat"              GATConv — attention, add_self_loops=False always
+#     "gat_v2"           GATv2Conv — dynamic attention (more expressive)
+#     "gcn"              GCNConv — spectral normalization
+#     "sage"             SAGEConv — neighborhood aggregation, inductive
+#     "gin"              GINConv — Weisfeiler-Lehman expressive
+#     "pna"              PNAConv — multiple aggregators (mean/max/min/std)
+#     "transformer"      TransformerConv — full multi-head attention, add_self_loops=False
+#     "mlp_only"         No message passing — pure node feature MLP (ablation)
+#     "edge_conv"        EdgeConv — edge feature aggregation (DynamicEdgeConv style)
+#
+#   n_layers:            [1, 2, 3, 4, 5]
+#   hidden_dim:          [32, 64, 128, 256]
+#   n_heads:             [2, 4, 8, 16]        — GAT/GATv2/Transformer only
+#   dropout:             [0.0, 0.05, 0.10, 0.20, 0.30]
+#   residual:            [true, false]         — skip connections between layers
+#   batch_norm:          [true, false]         — BN after each conv
+#   concat_heads:        [true, false]         — concat vs mean for multi-head (GAT)
+#   aggr:                ["mean", "max", "sum"] — aggregation for SAGE/GIN
+#
+# ── Output head ──
+#   boundary_head_layers:    [1, 2]            — MLP depth for boundary classification
+#   use_rate_head:           [true, false]      — whether to include rate regression aux task
+#   use_type_head:           [true, false]      — whether to include breath-type aux task
+#
+# ── Training ──
+#   lr:                  log-uniform [5e-5, 5e-2]
+#   weight_decay:        log-uniform [1e-6, 1e-2]
+#   pos_weight:          uniform [2.0, 20.0]         — BCEWithLogitsLoss positive class weight
+#   loss_rate_weight:    [0.0, 0.05, 0.10, 0.20]    — aux rate regression loss weight
+#   loss_type_weight:    [0.0, 0.10, 0.20]           — aux type classification loss weight
+#   optimizer:           ["adamw", "adam", "sgd_momentum"]
+#   scheduler:           ["cosine", "cosine_warmup", "plateau", "none"]
+#   warmup_epochs:       [0, 5, 10]                  — warmup for cosine_warmup
+#   max_epochs:          [50, 100, 150, 200]
+#   patience:            [10, 15, 20]                — early stopping patience (val F1)
+#   window_breaths:      [3, 4, 6, 8]               — breath-window size for graph extraction
+#   tol_samples_train:   [50, 75, 100]              — label assignment tolerance at training
+#   batch_size:          [16, 32, 64]
+#   augment:             ["none", "drift", "burst", "both", "heavy"]
+#   augment_prob:        [0.3, 0.5, 0.7]            — probability of applying augmentation
+#
+# ── Total search dimensionality: ~35–40 dimensions ──
+# Optuna TPE handles this well; expect ~30–50 trials to identify strong regions.
+# ──────────────────────────────────────────────────────────────────────────────
 execution:
   runner_type: ray_queue_runner
   entrypoint: python3 /srv/metaopt/project/scripts/ray_runner.py
   target_cluster_utilization: 0.90
   trial_budget:
     kind: fixed_trials
-    value: 30         # one per iteration; Optuna TPE over ~10-dim space
+    value: 1               # 1 Ray job per campaign iteration; Optuna TPE in orchestrator
   search_strategy:
     kind: optuna_tpe
     seed: 42
