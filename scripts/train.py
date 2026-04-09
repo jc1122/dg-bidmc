@@ -66,7 +66,11 @@ def compute_rate_mae(pred_troughs, gt_troughs, fs=125):
     return abs(pred_rate - gt_rate)
 
 def train_one_epoch(model, loader, optimizer, config, device):
-    """Train for one epoch. Returns mean loss."""
+    """Train for one epoch. Returns (mean_loss, device_used).
+    
+    Robust to GPU crashes: if a HIP/CUDA error occurs mid-batch,
+    moves model+data to CPU and retries remaining batches.
+    """
     model.train()
     total_loss = 0
     n_graphs = 0
@@ -76,32 +80,66 @@ def train_one_epoch(model, loader, optimizer, config, device):
     type_w = config.get('loss_type_weight', 0.0)
     
     for batch in loader:
-        batch = batch.to(device)
-        optimizer.zero_grad()
-        
-        out = model(batch.x, batch.edge_index, 
-                     edge_attr=batch.edge_attr if hasattr(batch, 'edge_attr') else None,
-                     batch=batch.batch if hasattr(batch, 'batch') else None)
-        
-        # Boundary loss (main)
-        bce = F.binary_cross_entropy_with_logits(
-            out['boundary_logits'], batch.y, pos_weight=pos_weight)
-        
-        loss = bce
-        
-        # Rate aux loss
-        if rate_w > 0 and 'rate_pred' in out and hasattr(batch, 'rate_target'):
-            rate_loss = F.mse_loss(out['rate_pred'].squeeze(), batch.rate_target)
-            loss = loss + rate_w * rate_loss
-        
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
-        optimizer.step()
-        
-        total_loss += loss.item() * batch.num_graphs
-        n_graphs += batch.num_graphs
+        try:
+            batch = batch.to(device)
+            optimizer.zero_grad()
+            
+            out = model(batch.x, batch.edge_index, 
+                         edge_attr=batch.edge_attr if hasattr(batch, 'edge_attr') else None,
+                         batch=batch.batch if hasattr(batch, 'batch') else None)
+            
+            # Boundary loss (main)
+            bce = F.binary_cross_entropy_with_logits(
+                out['boundary_logits'], batch.y, pos_weight=pos_weight)
+            
+            loss = bce
+            
+            # Rate aux loss
+            if rate_w > 0 and 'rate_pred' in out and hasattr(batch, 'rate_target'):
+                rate_loss = F.mse_loss(out['rate_pred'].squeeze(), batch.rate_target)
+                loss = loss + rate_w * rate_loss
+            
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            optimizer.step()
+            
+            total_loss += loss.item() * batch.num_graphs
+            n_graphs += batch.num_graphs
+        except RuntimeError as e:
+            err_msg = str(e).lower()
+            if any(k in err_msg for k in ('hip', 'cuda', 'device-side assert', 'invalid device function', 'out of memory')):
+                print(f"  [GPU ERROR] {e}")
+                if device != 'cpu':
+                    print("  Falling back to CPU for remainder of epoch")
+                    device = 'cpu'
+                    model.cpu()
+                    pos_weight = pos_weight.cpu()
+                    for pg in optimizer.param_groups:
+                        for p in pg['params']:
+                            state = optimizer.state.get(p, {})
+                            for k, v in state.items():
+                                if isinstance(v, torch.Tensor):
+                                    state[k] = v.cpu()
+                    # Retry this batch on CPU
+                    batch = batch.to('cpu')
+                    optimizer.zero_grad()
+                    out = model(batch.x, batch.edge_index,
+                                 edge_attr=batch.edge_attr if hasattr(batch, 'edge_attr') else None,
+                                 batch=batch.batch if hasattr(batch, 'batch') else None)
+                    bce = F.binary_cross_entropy_with_logits(
+                        out['boundary_logits'], batch.y, pos_weight=pos_weight)
+                    loss = bce
+                    loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+                    optimizer.step()
+                    total_loss += loss.item() * batch.num_graphs
+                    n_graphs += batch.num_graphs
+                else:
+                    raise
+            else:
+                raise
     
-    return total_loss / max(n_graphs, 1)
+    return total_loss / max(n_graphs, 1), device
 
 @torch.no_grad()
 def evaluate(model, loader, device, threshold=0.5, tol_samples=75, fs=125):
@@ -236,9 +274,13 @@ def train(config: dict, train_dir: str, val_dir: str,
     no_improve = 0
     history = []
     
+    gpu_fell_back = False
     for epoch in range(n_epochs):
         t0 = time.time()
-        train_loss = train_one_epoch(model, train_loader, optimizer, config, device)
+        train_loss, device = train_one_epoch(model, train_loader, optimizer, config, device)
+        if not gpu_fell_back and device == 'cpu' and config.get('_original_device', 'cuda') != 'cpu':
+            gpu_fell_back = True
+            print("  [WARN] Continuing training on CPU after GPU fallback")
         
         # Evaluate
         val_metrics = evaluate(model, val_loader, device, tol_samples=tol)

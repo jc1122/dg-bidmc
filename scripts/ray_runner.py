@@ -21,8 +21,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-# Project root on the head/worker node
-PROJECT_ROOT = Path('/root/dg_bidmc')
+# Project root: prefer env override, then cwd, then fallback
+PROJECT_ROOT = Path(os.environ.get('DG_PROJECT_ROOT', os.getcwd()))
 
 def get_default_config():
     """Default config for a basic GAT experiment."""
@@ -95,7 +95,10 @@ def get_default_config():
     }
 
 def run_trial(config: dict) -> dict:
-    """Run one training trial. Returns result dict."""
+    """Run one training trial. Returns result dict.
+    
+    GPU-robust: catches HIP/CUDA errors and retries on CPU if needed.
+    """
     from train import train
 
     # Data directories on the worker
@@ -116,16 +119,40 @@ def run_trial(config: dict) -> dict:
     if not Path(val_adv_dir).exists() or not list(Path(val_adv_dir).glob('*.pt')):
         val_adv_dir = None
 
-    device = 'cuda' if os.environ.get('CUDA_VISIBLE_DEVICES', '') or True else 'cpu'
+    device = 'cpu'
     try:
         import torch
-        if not torch.cuda.is_available():
-            device = 'cpu'
+        if torch.cuda.is_available():
+            device = 'cuda'
     except ImportError:
-        device = 'cpu'
+        pass
 
+    config['_original_device'] = device
     t0 = time.time()
-    result = train(config, train_dir, val_dir, val_adv_dir, device=device, verbose=True)
+    
+    # Try GPU first, fall back to CPU on fatal GPU error
+    max_gpu_retries = 2
+    for attempt in range(max_gpu_retries + 1):
+        try:
+            result = train(config, train_dir, val_dir, val_adv_dir,
+                         device=device, verbose=True)
+            break
+        except RuntimeError as e:
+            err_msg = str(e).lower()
+            is_gpu_err = any(k in err_msg for k in (
+                'hip', 'cuda', 'device-side assert',
+                'invalid device function', 'out of memory',
+            ))
+            if is_gpu_err and device != 'cpu' and attempt < max_gpu_retries:
+                print(f"  [GPU CRASH attempt {attempt+1}] {e}")
+                import torch
+                torch.cuda.empty_cache()
+                if attempt == max_gpu_retries - 1:
+                    print("  Falling back to CPU training")
+                    device = 'cpu'
+            else:
+                raise
+    
     wall_time = time.time() - t0
 
     # Format output for metaopt
