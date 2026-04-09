@@ -456,6 +456,10 @@ dg_bidmc/
    `add_self_loops=True` internally calls `remove_self_loops` which uses boolean tensor indexing
    → `hipErrorInvalidDeviceFunction`. Since DG graphs are DAGs with no self-loops, setting
    `add_self_loops=False` is both correct and avoids the broken code path.
+   **Patch opportunity**: `jc1122/pytorch-gfx1010` covers composable_kernel (matmul/conv) and
+   BatchNorm2d backward (MIOpen DPP). The `torch.nonzero()` / boolean-index kernel gap is NOT
+   yet covered. When patching, add a HIP kernel for `at::nonzero_cuda` compiled for `gfx1010`.
+   Until then, avoid all GPU boolean-index ops (nonzero, masked_select, bool-indexed __getitem__).
 9. **`build_graph()` requires C-contiguous float64 input** — `scipy.signal.filtfilt()` output is
    not C-contiguous. Always use `np.ascontiguousarray(signal, dtype=np.float64)` before passing
    to `degreegraph.compute_arrays()` or `build_graph()`.
