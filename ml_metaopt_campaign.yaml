@@ -1,0 +1,147 @@
+version: 3
+campaign_id: dg-gat-respiratory-v1
+goal: >
+  Train a DG-GAT model to detect inhale/exhale trough boundaries in ICU impedance
+  pneumography signals, beating the implied SOTA (Charlton SQI F1 ≈ 0.800 on quality
+  segments) whole-signal across all adversarial conditions in the BIDMC dataset.
+
+# ────────────────────────────────────────────────────────────────
+# Objective
+# Primary metric: boundary F1 at ±600 ms tolerance (75 samples @ 125 Hz)
+# No published per-breath F1 benchmark exists for this protocol.
+# SOTA reference: Charlton 2021 SQI peak-detection → sensitivity 77.7% /
+# specificity 82.3% → implied F1 ≈ 0.800 (quality segments only, BIDMC).
+# Stop when DG-GAT beats this whole-signal (F1 ≥ 0.82).
+# ────────────────────────────────────────────────────────────────
+objective:
+  metric: boundary_f1_600ms
+  direction: maximize
+  aggregation:
+    method: weighted_mean
+    weights:
+      bidmc_val: 0.7
+      bidmc_val_adversarial: 0.3
+  improvement_threshold: 0.005   # treat Δ < 0.005 as noise
+
+# ────────────────────────────────────────────────────────────────
+# Datasets
+# Populated after Phase 1 data preparation (data_loader.py).
+# fingerprint: sha256 of the .pt cache directory (compute with
+#   find data/graphs/{split}/ -name "*.pt" -print0 | sort -z |
+#   xargs -0 sha256sum | sha256sum
+# )
+# ────────────────────────────────────────────────────────────────
+datasets:
+  - id: bidmc_val
+    local_path: data/graphs/val/
+    role: train_eval
+    fingerprint: sha256:0000000000000000000000000000000000000000000000000000000000000001
+    # REPLACE with: sha256 of val .pt cache after Phase 1
+
+  - id: bidmc_val_adversarial
+    local_path: data/graphs/val_adversarial/
+    role: eval_only
+    fingerprint: sha256:0000000000000000000000000000000000000000000000000000000000000002
+    # REPLACE with: sha256 of val_adversarial subset (drift/sigh/irregular patients)
+    # Subset of val: patients with drift_severity > 0.10 OR sigh_rate > 0.10 OR irregularity_cv > 0.15
+
+  # Training data is referenced only via the entrypoint script (not listed here
+  # as a dataset because the runner manages its own train split loading).
+
+# ────────────────────────────────────────────────────────────────
+# Baseline
+# Measured zero-shot DG-v5: F1 = 0.322 @ ±600ms across 5 patients.
+# Update these after first DG-GAT training run in Phase 1.
+# ────────────────────────────────────────────────────────────────
+baseline:
+  aggregate: 0.322
+  by_dataset:
+    bidmc_val: 0.322
+    bidmc_val_adversarial: 0.290    # conservative estimate (drift/sigh patients worse)
+  # TODO: after Phase 1 — replace with measured val F1 from first DG-GAT run
+
+# ────────────────────────────────────────────────────────────────
+# Stop conditions
+# target_metric = 0.82 → beats Charlton's SQI whole-signal (implied SOTA F1 ≈ 0.80)
+# max_iterations: 30 (Optuna TPE needs ~30 for 9-dim search space to converge)
+# max_no_improve_iterations: 5 (early stop if stuck)
+# ────────────────────────────────────────────────────────────────
+stop_conditions:
+  max_iterations: 30
+  max_no_improve_iterations: 5
+  target_metric: 0.82
+  max_wallclock_hours: 96
+
+proposal_policy:
+  current_target: 6
+  current_floor: 3
+  next_cap: 100
+  distinctness_rule: non_overlapping
+
+dispatch_policy:
+  background_slots: 4    # Aorus has 1 GPU — keep concurrency low
+  auxiliary_slots: 2
+
+# ────────────────────────────────────────────────────────────────
+# Sanity check
+# scripts/local_sanity.py: 1 patient, build DG graph, model forward pass
+# Must complete in < 60s; checks:
+#   1. wfdb loads bidmc01 OK
+#   2. build_graph() succeeds
+#   3. PyG Data object constructed
+#   4. DGGAT forward pass on CPU
+#   5. boundary_f1() callable
+# ────────────────────────────────────────────────────────────────
+sanity:
+  command: python3 /root/dg_bidmc/scripts/local_sanity.py --fast
+  max_duration_seconds: 60
+  require_zero_temporal_leakage: true
+  require_config_load: true
+
+artifacts:
+  code_roots:
+    - .
+  data_roots:
+    - data
+  exclude:
+    - .git
+    - .venv
+    - .ml-metaopt
+    - __pycache__
+    - "*.pyc"
+    - "data/raw/"          # raw BIDMC wfdb files — large, re-downloaded on demand
+
+remote_queue:
+  backend: ray-hetzner
+  retry_policy:
+    max_attempts: 2
+  enqueue_command: python3 /opt/ray-hetzner/metaopt/enqueue_batch.py --manifest
+  status_command: python3 /opt/ray-hetzner/metaopt/get_batch_status.py --batch-id
+  results_command: python3 /opt/ray-hetzner/metaopt/fetch_batch_results.py --batch-id
+
+# ────────────────────────────────────────────────────────────────
+# Execution
+# ray_runner.py reads hyperparameters from env var METAOPT_TRIAL_CONFIG (JSON).
+# Returns a JSON result file at the path in env var METAOPT_RESULT_PATH.
+# Hyperparameter search space (Optuna TPE):
+#   hidden_dim:      categorical [32, 64, 128]
+#   n_heads:         categorical [4, 8]
+#   n_layers:        int [2, 4]
+#   dropout:         float [0.0, 0.25]
+#   lr:              log-uniform [5e-4, 5e-3]
+#   weight_decay:    log-uniform [1e-5, 1e-3]
+#   pos_weight:      float [4.0, 12.0]
+#   window_breaths:  categorical [4, 6, 8]
+#   augment:         categorical [none, drift, burst, both]
+#   tol_samples:     categorical [50, 75, 100]  (label assignment tolerance during training)
+# ────────────────────────────────────────────────────────────────
+execution:
+  runner_type: ray_queue_runner
+  entrypoint: python3 /srv/metaopt/project/scripts/ray_runner.py
+  target_cluster_utilization: 0.90
+  trial_budget:
+    kind: fixed_trials
+    value: 30         # one per iteration; Optuna TPE over ~10-dim space
+  search_strategy:
+    kind: optuna_tpe
+    seed: 42
