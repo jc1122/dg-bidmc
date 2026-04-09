@@ -17,7 +17,7 @@ import torch.nn.functional as F
 from torch_geometric.loader import DataLoader
 
 from model import build_model, count_parameters
-from graph_features import compute_feature_dims
+from graph_features import compute_feature_dims, cache_split_graphs
 
 def load_cached_graphs(data_dir: str) -> list:
     """Load all .pt files from a directory."""
@@ -25,6 +25,58 @@ def load_cached_graphs(data_dir: str) -> list:
     data_dir = Path(data_dir)
     files = sorted(data_dir.glob("*.pt"))
     return [torch.load(f, weights_only=False) for f in files]
+
+
+def _rebuild_graphs_if_needed(
+    data_dir: str, split_name: str, config: dict, verbose: bool = True
+) -> str:
+    """Rebuild cached graphs when feature dims don't match config.
+
+    Returns the (possibly updated) data_dir path.
+    """
+    expected_in, expected_edge = compute_feature_dims(config)
+    existing = sorted(Path(data_dir).glob("*.pt"))
+    if existing:
+        sample = torch.load(existing[0], weights_only=False)
+        cached_in = sample.x.shape[1] if sample.x.dim() == 2 else 0
+        cached_edge = sample.edge_attr.shape[1] if sample.edge_attr.dim() == 2 else 0
+        if cached_in == expected_in and cached_edge == expected_edge:
+            return data_dir  # dims match, use as-is
+    else:
+        cached_in, cached_edge = 0, 0
+
+    if verbose:
+        print(f"  Rebuilding {split_name} graphs: cached=({cached_in},{cached_edge}), "
+              f"need=({expected_in},{expected_edge})")
+
+    from data_loader import load_all_patients, get_splits, profile_patient
+    patients = load_all_patients(verbose=False)
+    splits = get_splits()
+
+    # Determine which patient IDs to use
+    if split_name == "val_adversarial":
+        split_ids = [
+            pid for pid in splits["val"]
+            if profile_patient(patients[pid]).get("is_adversarial", False)
+        ]
+    elif split_name in splits:
+        split_ids = splits[split_name]
+    else:
+        # Infer from existing filenames
+        split_ids = sorted(set(
+            f.stem.rsplit("_w", 1)[0] for f in Path(data_dir).glob("*.pt")
+        ))
+
+    wb = config.get("window_breaths", 6)
+    # Clear old files
+    for f in Path(data_dir).glob("*.pt"):
+        f.unlink()
+    cache_split_graphs(patients, split_ids, data_dir, config=config,
+                       window_breaths=wb)
+    if verbose:
+        n_new = len(list(Path(data_dir).glob("*.pt")))
+        print(f"  Rebuilt {n_new} graphs for {split_name}")
+    return data_dir
 
 def compute_boundary_f1(pred_troughs, gt_troughs, tol_samples=75):
     """Compute boundary F1 at ±tol_samples tolerance.
@@ -229,7 +281,12 @@ def train(config: dict, train_dir: str, val_dir: str,
     Returns dict with:
         best_val_f1, best_val_rate_mae, final_metrics, training_history
     """
-    # Load data
+    # Load data — rebuild graphs if feature dims don't match config
+    train_dir = _rebuild_graphs_if_needed(train_dir, "train", config, verbose)
+    val_dir = _rebuild_graphs_if_needed(val_dir, "val", config, verbose)
+    if val_adv_dir:
+        val_adv_dir = _rebuild_graphs_if_needed(val_adv_dir, "val_adversarial", config, verbose)
+
     train_data = load_cached_graphs(train_dir)
     val_data = load_cached_graphs(val_dir)
     val_adv_data = load_cached_graphs(val_adv_dir) if val_adv_dir else []
