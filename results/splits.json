@@ -1,0 +1,68 @@
+{
+  "train": [
+    "bidmc01",
+    "bidmc02",
+    "bidmc03",
+    "bidmc04",
+    "bidmc06",
+    "bidmc07",
+    "bidmc08",
+    "bidmc09",
+    "bidmc10",
+    "bidmc18",
+    "bidmc20",
+    "bidmc21",
+    "bidmc22",
+    "bidmc23",
+    "bidmc26",
+    "bidmc28",
+    "bidmc30",
+    "bidmc32",
+    "bidmc33",
+    "bidmc34",
+    "bidmc35",
+    "bidmc37",
+    "bidmc38",
+    "bidmc39",
+    "bidmc41",
+    "bidmc42",
+    "bidmc43",
+    "bidmc45",
+    "bidmc47",
+    "bidmc48",
+    "bidmc49",
+    "bidmc50",
+    "bidmc51",
+    "bidmc52"
+  ],
+  "val": [
+    "bidmc12",
+    "bidmc14",
+    "bidmc16",
+    "bidmc17",
+    "bidmc31",
+    "bidmc36",
+    "bidmc40",
+    "bidmc53"
+  ],
+  "test": [
+    "bidmc11",
+    "bidmc13",
+    "bidmc15",
+    "bidmc19",
+    "bidmc24",
+    "bidmc25",
+    "bidmc27",
+    "bidmc29",
+    "bidmc44",
+    "bidmc46"
+  ],
+  "excluded": [
+    "bidmc05"
+  ],
+  "notes": {
+    "bidmc05": "Only 3 troughs \u2014 unusable for training",
+    "test_strategy": "Worst adversarial cases reserved for test set",
+    "total_usable": 52
+  }
+}

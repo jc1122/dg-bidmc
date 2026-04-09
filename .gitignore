@@ -1,0 +1,28 @@
+# Raw BIDMC recordings (large binary files — use scripts/download_bidmc.py)
+data/bidmc/*.dat
+data/bidmc/*.hea
+data/bidmc/*.atr
+data/bidmc/*.breath
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# Notebooks
+.ipynb_checkpoints/
+
+# IDE
+.vscode/
+.idea/
+
+# Env
+.env
+*.env
+
+# Misc
+*.log
+.DS_Store
