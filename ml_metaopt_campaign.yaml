@@ -55,14 +55,12 @@ datasets:
   - id: bidmc_val
     local_path: data/graphs/val/
     role: train_eval
-    fingerprint: sha256:0000000000000000000000000000000000000000000000000000000000000001
-    # TODO Phase 1: recompute sha256 after data/graphs/val/ cache is built
+    fingerprint: sha256:62daeb43966c70e9caf78a7ba34acb57511bb2879ee9da3fb8eec207ceb13e86
 
   - id: bidmc_val_adversarial
     local_path: data/graphs/val_adversarial/
     role: eval_only
-    fingerprint: sha256:0000000000000000000000000000000000000000000000000000000000000002
-    # TODO Phase 1: recompute sha256 after data/graphs/val_adversarial/ is built
+    fingerprint: sha256:70354336267de5cfd14bb5e4e94488aef58b40159cf6cf3dca6cd3f59ece5309
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Baseline
