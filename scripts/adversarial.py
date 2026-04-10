@@ -16,7 +16,11 @@ from common import (
     FS, D_MIN, D_MAX, A_UP, A_DOWN, F_FINE, SNR_DB,
     IMPULSE_LABELS, CORRECTION_LABELS,
 )
-from generate_scfg import make_terminal, make_sentence
+try:
+    from generate_scfg import make_terminal, make_sentence
+except ImportError:
+    make_terminal = None
+    make_sentence = None
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────

@@ -86,7 +86,7 @@ baseline:
 stop_conditions:
   max_iterations: 60
   max_no_improve_iterations: 8
-  target_metric: 0.95
+  target_metric: 0.99
   max_wallclock_hours: 168           # 1 week
 
 proposal_policy:

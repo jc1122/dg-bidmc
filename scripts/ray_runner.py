@@ -92,6 +92,13 @@ def get_default_config():
         'batch_size': 32,
         'augment': 'none',
         'augment_prob': 0.5,
+        'n_augmented_copies': 0,
+        'augment_snr_min': 15.0,
+        'augment_snr_max': 30.0,
+        'augment_drift_min': 0.0005,
+        'augment_drift_max': 0.003,
+        'augment_max_simultaneous': 3,
+        'label_sigma': 0,  # 0 = hard labels; >0 = Gaussian soft labels (samples)
     }
 
 def run_trial(config: dict) -> dict:

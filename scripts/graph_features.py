@@ -19,6 +19,57 @@ from torch_geometric.data import Data
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from dg_pipeline import build_graph, assign_levels
 
+def augment_signal(
+    signal: np.ndarray,
+    rng: np.random.Generator,
+    config: dict | None = None,
+    fs: int = 125,
+) -> np.ndarray:
+    """Apply random signal-level augmentation before DG graph construction.
+
+    Randomly selects 1-3 augmentation types and applies them with random
+    parameters. Used to generate diverse training data.
+    """
+    from adversarial import (
+        add_pink_noise, add_brown_noise, add_burst_noise,
+        add_dc_drift, add_harmonic_interference,
+    )
+
+    augment_prob = float(config.get('augment_prob', 0.7)) if config else 0.7
+    if rng.random() > augment_prob:
+        return signal.copy()
+
+    snr_min = float(config.get('augment_snr_min', 15.0)) if config else 15.0
+    snr_max = float(config.get('augment_snr_max', 30.0)) if config else 30.0
+    drift_min = float(config.get('augment_drift_min', 0.0005)) if config else 0.0005
+    drift_max = float(config.get('augment_drift_max', 0.003)) if config else 0.003
+    max_simultaneous = int(config.get('augment_max_simultaneous', 3)) if config else 3
+
+    aug_types = [
+        'pink_noise', 'brown_noise', 'burst_noise',
+        'dc_drift', 'harmonic_interference',
+    ]
+
+    n_apply = rng.integers(1, min(max_simultaneous, len(aug_types)) + 1)
+    chosen = rng.choice(aug_types, size=n_apply, replace=False).tolist()
+
+    out = signal.copy()
+    for aug_type in chosen:
+        snr = rng.uniform(snr_min, snr_max)
+        if aug_type == 'pink_noise':
+            out = add_pink_noise(out, snr, rng)
+        elif aug_type == 'brown_noise':
+            out = add_brown_noise(out, snr, rng)
+        elif aug_type == 'burst_noise':
+            out = add_burst_noise(out, snr, rng)
+        elif aug_type == 'dc_drift':
+            drift_rate = rng.uniform(drift_min, drift_max)
+            out = add_dc_drift(out, drift_rate)
+        elif aug_type == 'harmonic_interference':
+            out = add_harmonic_interference(out, fs=fs, rng=rng)
+
+    return out
+
 # ---------------------------------------------------------------------------
 # Default feature configuration — matches campaign search space
 # ---------------------------------------------------------------------------
@@ -570,14 +621,24 @@ def extract_graph_data(
     # Edge features
     edge_index, edge_attr = _extract_edge_features(graph, sig_lp, config)
 
-    # Node labels: boundary if within tol of any GT trough
+    # Node labels: boundary score based on proximity to GT troughs
     node_bars = np.asarray(graph.node_bar)
     n_nodes = len(node_bars)
+    label_sigma = (config or {}).get('label_sigma', 0)
     y_boundary = np.zeros(n_nodes, dtype=np.float32)
     for trough in gt_troughs:
         dists = np.abs(node_bars.astype(np.int64) - int(trough))
-        if len(dists) > 0 and dists.min() <= tol_samples:
-            y_boundary[np.argmin(dists)] = 1.0
+        if len(dists) == 0:
+            continue
+        if label_sigma > 0:
+            # Gaussian soft labels: weight decays with distance from GT
+            mask = dists <= tol_samples
+            weights = np.exp(-0.5 * (dists[mask].astype(np.float64) / label_sigma) ** 2)
+            y_boundary[mask] = np.maximum(y_boundary[mask], weights.astype(np.float32))
+        else:
+            # Hard binary labels (original behavior)
+            if dists.min() <= tol_samples:
+                y_boundary[np.argmin(dists)] = 1.0
 
     in_dim, edge_dim = compute_feature_dims(config)
 
@@ -602,6 +663,7 @@ def generate_patient_graphs(
     config: dict | None = None,
     window_breaths: int = 6,
     tol_samples: int = 75,
+    n_augmented_copies: int = 0,
 ) -> list[Data]:
     """Generate sliding-window graph Data objects for one patient.
 
@@ -625,6 +687,7 @@ def generate_patient_graphs(
     signal = np.asarray(patient_data["signal"], dtype=np.float64)
     troughs = sorted(patient_data["troughs"])
     fs = int(patient_data.get("fs", 125))
+    pid_hash = patient_data.get("pid", id(patient_data))
 
     if len(troughs) < window_breaths + 1:
         # Not enough troughs for even one window
@@ -665,6 +728,16 @@ def generate_patient_graphs(
                                   tol_samples=tol_samples, fs=fs)
         graphs.append(data)
 
+        # Generate augmented copies of this window
+        for aug_i in range(n_augmented_copies):
+            seed = hash((pid_hash, w, aug_i)) & 0xFFFFFFFF
+            aug_rng = np.random.default_rng(seed)
+            aug_seg = augment_signal(seg, aug_rng, config=config, fs=fs)
+            aug_data = extract_graph_data(aug_seg, local_troughs, config=config,
+                                          tol_samples=tol_samples, fs=fs)
+            if aug_data is not None and aug_data.x.shape[0] > 0:
+                graphs.append(aug_data)
+
     return graphs
 
 
@@ -702,17 +775,30 @@ def cache_split_graphs(
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
+    # Only augment training data (detect via output_dir path)
+    n_aug = config.get('n_augmented_copies', 0) if config else 0
+    if 'train' not in str(output_dir):
+        n_aug = 0
+
     written_paths: list[Path] = []
     for pid in sorted(split_ids):
         if pid not in patients:
             continue
-        graphs = generate_patient_graphs(patients[pid], config=config,
-                                         window_breaths=window_breaths)
+        pdata = patients[pid]
+        if 'pid' not in pdata:
+            pdata = {**pdata, 'pid': pid}
+        graphs = generate_patient_graphs(pdata, config=config,
+                                         window_breaths=window_breaths,
+                                         n_augmented_copies=n_aug)
         for i, data in enumerate(graphs):
             fname = f"{pid}_w{i:04d}.pt"
             fpath = out / fname
             torch.save(data, fpath)
             written_paths.append(fpath)
+
+    # Write augmentation marker for rebuild detection
+    if n_aug > 0:
+        (out / '.augment_marker').write_text(str(n_aug))
 
     # Compute fingerprint
     h = hashlib.sha256()

@@ -477,3 +477,9 @@ Follow `RESEARCH_PLAN.md`. The implementation sequence is:
 5. `scripts/evaluate.py` — full evaluation harness with comparison methods
 
 Tests go in `tests/`. Run with `python -m pytest tests/ -v`.
+
+## Active task
+`.ml-metaopt/state.json` exists. Inspect its `status`.
+If `status` is `RUNNING`, invoke the `ml-metaoptimization` skill immediately,
+resume from `machine_state`, and do not ask the user for campaign inputs.
+If `status` is terminal, remove this block, stop auto-resuming, and surface `next_action` to the operator without executing from it.

@@ -46,7 +46,7 @@ def make_runtime_env(project_root: Path) -> dict:
         "excludes": [
             ".git", "__pycache__", "*.pyc",
             ".ml-metaopt", "notebooks", "results",
-            "data/bidmc", ".gitignore.bak",
+            "data/bidmc", "data/graphs", ".gitignore.bak",
         ],
     }
 

@@ -20,6 +20,27 @@ from model import build_model, count_parameters
 from graph_features import compute_feature_dims, cache_split_graphs
 
 
+def _apply_soft_labels(batch, sigma: float, tol: int) -> torch.Tensor:
+    """Convert hard binary labels to Gaussian soft labels on-the-fly.
+
+    Uses hard labels (y==1) to locate GT boundary nodes, then computes
+    Gaussian-weighted scores for all nodes within *tol* samples.
+    Runs on CPU to avoid gfx1010 missing-kernel issues with boolean indexing.
+    """
+    bars = batch.node_bars.cpu().float()
+    y_hard = batch.y.cpu()
+    gt_indices = (y_hard >= 0.5).nonzero(as_tuple=True)[0]
+    if len(gt_indices) == 0:
+        return batch.y
+
+    gt_bars = bars[gt_indices]
+    dists = torch.abs(bars.unsqueeze(1) - gt_bars.unsqueeze(0))
+    weights = torch.exp(-0.5 * (dists / sigma) ** 2)
+    weights[dists > tol] = 0.0
+    y_soft, _ = weights.max(dim=1)
+    return y_soft.to(batch.y.device)
+
+
 def focal_loss_with_logits(logits, targets, alpha=0.25, gamma=2.0, pos_weight=None):
     """Focal loss for binary classification (operates on logits).
     
@@ -61,7 +82,24 @@ def _rebuild_graphs_if_needed(
         cached_in = sample.x.shape[1] if sample.x.dim() == 2 else 0
         cached_edge = sample.edge_attr.shape[1] if sample.edge_attr.dim() == 2 else 0
         if cached_in == expected_in and cached_edge == expected_edge:
-            return data_dir  # dims match, use as-is
+            # Check if augmentation config matches via marker file
+            n_aug = config.get('n_augmented_copies', 0) if config else 0
+            marker = Path(data_dir) / '.augment_marker'
+            if split_name == 'train' and n_aug > 0:
+                cached_n_aug = 0
+                if marker.exists():
+                    try:
+                        cached_n_aug = int(marker.read_text().strip())
+                    except (ValueError, OSError):
+                        pass
+                if cached_n_aug != n_aug:
+                    if verbose:
+                        print(f"  Augmentation rebuild: cached n_aug={cached_n_aug}, need={n_aug}")
+                    cached_in = -1  # force rebuild
+                else:
+                    return data_dir
+            else:
+                return data_dir  # dims match, use as-is
     else:
         cached_in, cached_edge = 0, 0
 
@@ -154,6 +192,8 @@ def train_one_epoch(model, loader, optimizer, config, device):
     use_focal = config.get('boundary_loss', 'bce') == 'focal'
     focal_gamma = config.get('focal_gamma', 2.0)
     focal_alpha = config.get('focal_alpha', 0.25)
+    label_sigma = config.get('label_sigma', 0)
+    tol_samples = config.get('tol_samples_train', 75)
     
     for batch in loader:
         try:
@@ -164,14 +204,19 @@ def train_one_epoch(model, loader, optimizer, config, device):
                          edge_attr=batch.edge_attr if hasattr(batch, 'edge_attr') else None,
                          batch=batch.batch if hasattr(batch, 'batch') else None)
             
+            # Compute soft labels on-the-fly if label_sigma > 0
+            targets = batch.y
+            if label_sigma > 0 and hasattr(batch, 'node_bars'):
+                targets = _apply_soft_labels(batch, label_sigma, tol_samples)
+            
             # Boundary loss (main)
             if use_focal:
                 bce = focal_loss_with_logits(
-                    out['boundary_logits'], batch.y,
+                    out['boundary_logits'], targets,
                     alpha=focal_alpha, gamma=focal_gamma, pos_weight=pos_weight)
             else:
                 bce = F.binary_cross_entropy_with_logits(
-                    out['boundary_logits'], batch.y, pos_weight=pos_weight)
+                    out['boundary_logits'], targets, pos_weight=pos_weight)
             
             loss = bce
             
@@ -207,13 +252,17 @@ def train_one_epoch(model, loader, optimizer, config, device):
                     out = model(batch.x, batch.edge_index,
                                  edge_attr=batch.edge_attr if hasattr(batch, 'edge_attr') else None,
                                  batch=batch.batch if hasattr(batch, 'batch') else None)
+                    # Compute soft labels for CPU fallback
+                    cpu_targets = batch.y
+                    if label_sigma > 0 and hasattr(batch, 'node_bars'):
+                        cpu_targets = _apply_soft_labels(batch, label_sigma, tol_samples)
                     if use_focal:
                         bce = focal_loss_with_logits(
-                            out['boundary_logits'], batch.y,
+                            out['boundary_logits'], cpu_targets,
                             alpha=focal_alpha, gamma=focal_gamma, pos_weight=pos_weight)
                     else:
                         bce = F.binary_cross_entropy_with_logits(
-                            out['boundary_logits'], batch.y, pos_weight=pos_weight)
+                            out['boundary_logits'], cpu_targets, pos_weight=pos_weight)
                     loss = bce
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -247,8 +296,13 @@ def nms_1d(bars, scores, min_dist):
 
 @torch.no_grad()
 def evaluate(model, loader, device, threshold=0.5, tol_samples=75, fs=125,
-             nms_dist=0):
-    """Evaluate model on a data loader. Returns dict with metrics."""
+             nms_dist=0, top_n=0):
+    """Evaluate model on a data loader. Returns dict with metrics.
+    
+    Args:
+        top_n: if >0, after NMS keep only top-N predictions by score per graph.
+               This eliminates FP from over-prediction.
+    """
     model.eval()
     all_f1s = []
     all_rate_maes = []
@@ -284,6 +338,16 @@ def evaluate(model, loader, device, threshold=0.5, tol_samples=75, fs=125,
                 pred_troughs = nms_1d(g_bars[above], g_scores[above], nms_dist)
             else:
                 pred_troughs = g_bars[above]
+            
+            # Top-N constraint: keep only highest-scored predictions
+            if top_n > 0 and len(pred_troughs) > top_n:
+                pred_scores = np.array([
+                    g_scores[np.argmin(np.abs(g_bars - pb))]
+                    for pb in pred_troughs
+                ])
+                keep_idx = np.argsort(-pred_scores)[:top_n]
+                pred_troughs = np.sort(pred_troughs[keep_idx])
+            
             gt_troughs = g_bars[g_labels > 0.5]
             
             f1 = compute_boundary_f1(pred_troughs, gt_troughs, tol_samples)
@@ -302,20 +366,45 @@ def evaluate(model, loader, device, threshold=0.5, tol_samples=75, fs=125,
 
 
 def optimize_threshold(model, loader, device, tol_samples=75, fs=125,
-                       nms_dist=0):
-    """Search for the threshold+NMS that maximizes boundary F1 on a loader."""
+                       nms_dist=0, window_breaths=6):
+    """Search for threshold+NMS+top_n that maximizes boundary F1.
+    
+    Two-phase search: coarse grid then fine-tuning around the best.
+    Also searches top_n constraint (0=off, or window_breaths count).
+    """
     best_f1 = 0.0
     best_thresh = 0.5
     best_nms = nms_dist
-    for thresh in np.arange(0.20, 0.80, 0.05):
-        for nd in ([0, 30, 50, 75, 100] if nms_dist == 0 else [nms_dist]):
-            metrics = evaluate(model, loader, device, threshold=thresh,
-                               tol_samples=tol_samples, fs=fs, nms_dist=nd)
-            if metrics['boundary_f1_600ms'] > best_f1:
-                best_f1 = metrics['boundary_f1_600ms']
-                best_thresh = float(thresh)
-                best_nms = int(nd)
-    return best_thresh, best_nms, best_f1
+    best_top_n = 0
+    
+    # Phase 1: coarse grid
+    for thresh in np.arange(0.15, 0.90, 0.05):
+        for nd in [0, 50, 75, 100, 120, 150]:
+            for tn in [0, window_breaths]:
+                metrics = evaluate(model, loader, device, threshold=thresh,
+                                   tol_samples=tol_samples, fs=fs,
+                                   nms_dist=nd, top_n=tn)
+                if metrics['boundary_f1_600ms'] > best_f1:
+                    best_f1 = metrics['boundary_f1_600ms']
+                    best_thresh = float(thresh)
+                    best_nms = int(nd)
+                    best_top_n = int(tn)
+    
+    # Phase 2: fine search around best
+    for thresh in np.arange(max(0.10, best_thresh - 0.10),
+                            min(0.95, best_thresh + 0.10), 0.01):
+        for nd in range(max(0, best_nms - 30), best_nms + 35, 5):
+            for tn in [0, window_breaths]:
+                metrics = evaluate(model, loader, device, threshold=thresh,
+                                   tol_samples=tol_samples, fs=fs,
+                                   nms_dist=nd, top_n=tn)
+                if metrics['boundary_f1_600ms'] > best_f1:
+                    best_f1 = metrics['boundary_f1_600ms']
+                    best_thresh = float(thresh)
+                    best_nms = int(nd)
+                    best_top_n = int(tn)
+    
+    return best_thresh, best_nms, best_f1, best_top_n
 
 def make_scheduler(optimizer, config, n_epochs):
     """Create LR scheduler from config."""
@@ -402,6 +491,7 @@ def train(config: dict, train_dir: str, val_dir: str,
     
     best_val_f1 = 0.0
     best_metrics = {}
+    best_model_state = None
     no_improve = 0
     history = []
     
@@ -453,6 +543,7 @@ def train(config: dict, train_dir: str, val_dir: str,
             if val_adv_metrics:
                 best_metrics['val_adv_f1'] = val_adv_metrics['boundary_f1_600ms']
                 best_metrics['val_adv_rate_mae'] = val_adv_metrics['rate_mae_bpm']
+            best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
             no_improve = 0
         else:
             no_improve += 1
@@ -470,17 +561,24 @@ def train(config: dict, train_dir: str, val_dir: str,
                 print(f"  Early stopping at epoch {epoch} (no improve for {patience} epochs)")
             break
     
-    # Post-training: optimize threshold + NMS on validation set
-    opt_thresh, opt_nms, opt_f1 = optimize_threshold(
-        model, val_loader, device, tol_samples=tol)
+    # Restore best model before post-processing optimization
+    if best_model_state is not None:
+        model.load_state_dict(best_model_state)
+        model.to(device)
+    
+    # Post-training: optimize threshold + NMS + top_n on validation set
+    wb = config.get('window_breaths', 6)
+    opt_thresh, opt_nms, opt_f1, opt_top_n = optimize_threshold(
+        model, val_loader, device, tol_samples=tol, window_breaths=wb)
     if verbose:
-        print(f"  Threshold opt: thresh={opt_thresh:.2f}, nms={opt_nms}, val_f1={opt_f1:.4f} (was {best_metrics.get('val_f1', 0):.4f})")
+        print(f"  Threshold opt: thresh={opt_thresh:.2f}, nms={opt_nms}, top_n={opt_top_n}, val_f1={opt_f1:.4f} (was {best_metrics.get('val_f1', 0):.4f})")
 
     # Re-evaluate with optimized threshold
     final_val = evaluate(model, val_loader, device, threshold=opt_thresh,
-                         tol_samples=tol, nms_dist=opt_nms)
+                         tol_samples=tol, nms_dist=opt_nms, top_n=opt_top_n)
     final_adv = evaluate(model, val_adv_loader, device, threshold=opt_thresh,
-                         tol_samples=tol, nms_dist=opt_nms) if val_adv_loader else {}
+                         tol_samples=tol, nms_dist=opt_nms,
+                         top_n=opt_top_n) if val_adv_loader else {}
     if final_adv:
         final_agg = 0.55 * final_val['boundary_f1_600ms'] + 0.45 * final_adv['boundary_f1_600ms']
     else:
@@ -495,12 +593,21 @@ def train(config: dict, train_dir: str, val_dir: str,
             'epoch': best_metrics.get('epoch', len(history) - 1),
             'opt_threshold': opt_thresh,
             'opt_nms_dist': opt_nms,
+            'opt_top_n': opt_top_n,
         }
         if final_adv:
             best_metrics['val_adv_f1'] = final_adv['boundary_f1_600ms']
             best_metrics['val_adv_rate_mae'] = final_adv['rate_mae_bpm']
         if verbose:
             print(f"  ★ Post-opt improved: agg_f1={final_agg:.4f}")
+
+    # Save model checkpoint
+    checkpoint_dir = os.path.join(os.path.dirname(train_dir), 'checkpoints')
+    os.makedirs(checkpoint_dir, exist_ok=True)
+    ckpt_path = os.path.join(checkpoint_dir, 'best_model.pt')
+    torch.save(best_model_state or model.state_dict(), ckpt_path)
+    if verbose:
+        print(f"  Saved checkpoint to {ckpt_path}")
 
     return {
         'best_val_f1': best_val_f1,
@@ -510,4 +617,5 @@ def train(config: dict, train_dir: str, val_dir: str,
         'n_params': count_parameters(model),
         'opt_threshold': opt_thresh,
         'opt_nms_dist': opt_nms,
+        'opt_top_n': opt_top_n,
     }
