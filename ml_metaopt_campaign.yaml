@@ -133,9 +133,18 @@ remote_queue:
   backend: ray-hetzner
   retry_policy:
     max_attempts: 2
-  enqueue_command: python3 /opt/ray-hetzner/metaopt/enqueue_batch.py --manifest
-  status_command: python3 /opt/ray-hetzner/metaopt/get_batch_status.py --batch-id
-  results_command: python3 /opt/ray-hetzner/metaopt/fetch_batch_results.py --batch-id
+  enqueue_command: >-
+    python3 /opt/ray-hetzner/metaopt/enqueue_batch.py
+    --queue-root /root/dg_bidmc/.ml-metaopt
+    --manifest
+  status_command: >-
+    python3 /opt/ray-hetzner/metaopt/get_batch_status.py
+    --queue-root /root/dg_bidmc/.ml-metaopt
+    --batch-id
+  results_command: >-
+    python3 /opt/ray-hetzner/metaopt/fetch_batch_results.py
+    --queue-root /root/dg_bidmc/.ml-metaopt
+    --batch-id
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Execution

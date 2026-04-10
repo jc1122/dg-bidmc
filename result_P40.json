@@ -1,0 +1,12 @@
+{
+  "boundary_f1_600ms": 0.9357185156406638,
+  "rate_mae_bpm": 0.7759092618750845,
+  "by_dataset": {
+    "bidmc_val": 0.93864673501545,
+    "bidmc_val_adversarial": 0.9321395808492584
+  },
+  "status": "SUCCESS",
+  "wall_time_seconds": 513.1507909297943,
+  "n_epochs_run": 84,
+  "n_params": 735746
+}

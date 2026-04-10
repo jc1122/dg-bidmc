@@ -365,37 +365,188 @@ def evaluate(model, loader, device, threshold=0.5, tol_samples=75, fs=125,
     }
 
 
-def _collect_predictions(model, loader, device):
-    """Run model once on all data, return per-graph predictions.
+def _collect_predictions(model, loader, device, mc_samples=1,
+                         calibration_method='none', calibration_params=None,
+                         include_features=False):
+    """Run model on all data, return per-graph predictions.
     
-    Returns list of (scores, bars, labels) tuples, one per graph.
+    Args:
+        mc_samples: Number of forward passes with dropout for MC dropout (1=standard)
+        calibration_method: 'none', 'temperature', or 'platt'
+        calibration_params: dict with 'temperature' (float) or 'platt_slope'+'platt_intercept'
+        include_features: if True, each tuple has a 4th element: node features array
+    
+    Returns list of (scores, bars, labels[, features]) tuples, one per graph.
     """
-    model.eval()
+    if mc_samples > 1:
+        model.train()
+        for m in model.modules():
+            if isinstance(m, (torch.nn.BatchNorm1d,)):
+                m.eval()
+    else:
+        model.eval()
+    
     results = []
     with torch.no_grad():
         for batch in loader:
             batch = batch.to(device)
-            out = model(batch.x, batch.edge_index,
-                        edge_attr=batch.edge_attr if hasattr(batch, 'edge_attr') else None,
-                        batch=batch.batch if hasattr(batch, 'batch') else None)
-            logits = out['boundary_logits'].cpu().numpy()
+            if mc_samples > 1:
+                batch_logits = []
+                for _ in range(mc_samples):
+                    out = model(batch.x, batch.edge_index,
+                                edge_attr=batch.edge_attr if hasattr(batch, 'edge_attr') else None,
+                                batch=batch.batch if hasattr(batch, 'batch') else None)
+                    batch_logits.append(out['boundary_logits'].cpu().numpy())
+                logits = np.mean(batch_logits, axis=0)
+            else:
+                out = model(batch.x, batch.edge_index,
+                            edge_attr=batch.edge_attr if hasattr(batch, 'edge_attr') else None,
+                            batch=batch.batch if hasattr(batch, 'batch') else None)
+                logits = out['boundary_logits'].cpu().numpy()
+            
+            # Apply calibration
+            if calibration_method == 'temperature' and calibration_params:
+                T = calibration_params.get('temperature', 1.0)
+                logits = logits / T
+            elif calibration_method == 'platt' and calibration_params:
+                slope = calibration_params.get('platt_slope', 1.0)
+                intercept = calibration_params.get('platt_intercept', 0.0)
+                logits = slope * logits + intercept
+            
             scores = 1.0 / (1.0 + np.exp(-np.clip(logits, -500, 500)))
             labels = batch.y.cpu().numpy()
             node_bars = batch.node_bars.cpu().numpy()
+            feats = batch.x.cpu().numpy() if include_features else None
             batch_ids = batch.batch.cpu().numpy() if hasattr(batch, 'batch') and batch.batch is not None else np.zeros(len(logits), dtype=int)
             for g in range(batch.num_graphs):
                 mask = batch_ids == g
-                results.append((scores[mask], node_bars[mask], labels[mask]))
+                entry = (scores[mask], node_bars[mask], labels[mask])
+                if include_features:
+                    entry = entry + (feats[mask],)
+                results.append(entry)
+    
+    model.eval()  # Restore
     return results
 
 
+def _collect_raw_logits(model, loader, device, mc_samples=1):
+    """Collect raw pre-sigmoid logits from model. For calibration fitting.
+    
+    If mc_samples > 1, runs multiple forward passes with dropout active
+    and averages the logits.
+    """
+    if mc_samples > 1:
+        model.train()
+        # Keep BatchNorm in eval mode to avoid corrupting running stats
+        for m in model.modules():
+            if isinstance(m, (torch.nn.BatchNorm1d,)):
+                m.eval()
+    else:
+        model.eval()
+    
+    all_logits = []
+    all_labels = []
+    with torch.no_grad():
+        for batch in loader:
+            batch = batch.to(device)
+            if mc_samples > 1:
+                # Multiple forward passes, average logits
+                batch_logits = []
+                for _ in range(mc_samples):
+                    out = model(batch.x, batch.edge_index,
+                                edge_attr=batch.edge_attr if hasattr(batch, 'edge_attr') else None,
+                                batch=batch.batch if hasattr(batch, 'batch') else None)
+                    batch_logits.append(out['boundary_logits'].cpu().numpy())
+                logits = np.mean(batch_logits, axis=0)
+            else:
+                out = model(batch.x, batch.edge_index,
+                            edge_attr=batch.edge_attr if hasattr(batch, 'edge_attr') else None,
+                            batch=batch.batch if hasattr(batch, 'batch') else None)
+                logits = out['boundary_logits'].cpu().numpy()
+            all_logits.append(logits)
+            all_labels.append(batch.y.cpu().numpy())
+    
+    model.eval()  # Restore eval mode
+    return np.concatenate(all_logits), np.concatenate(all_labels)
+
+
+def learn_temperature(logits, labels):
+    """Learn temperature scaling parameter T to minimize NLL on validation logits.
+    
+    Returns optimal T in [0.1, 10.0].
+    """
+    def nll(T):
+        scaled = logits / T
+        # Numerically stable BCE: max(0, z) - z*y + log(1 + exp(-|z|))
+        z = scaled
+        loss = np.maximum(z, 0) - z * labels + np.log(1 + np.exp(-np.abs(z)))
+        return loss.mean()
+    
+    # Grid search (robust, no scipy dependency)
+    best_T = 1.0
+    best_nll = nll(1.0)
+    for T in np.arange(0.1, 10.05, 0.05):
+        val = nll(T)
+        if val < best_nll:
+            best_nll = val
+            best_T = T
+    # Fine search around best
+    for T in np.arange(max(0.1, best_T - 0.1), best_T + 0.11, 0.01):
+        val = nll(T)
+        if val < best_nll:
+            best_nll = val
+            best_T = T
+    return float(best_T)
+
+
+def fit_platt_scaling(logits, labels):
+    """Fit Platt scaling (logistic regression) on validation logits.
+    
+    Returns (slope, intercept) tuple for: calibrated = sigmoid(slope * logit + intercept)
+    """
+    from sklearn.linear_model import LogisticRegression
+    lr = LogisticRegression(solver='lbfgs', C=1e10, max_iter=10000,
+                            class_weight='balanced')
+    lr.fit(logits.reshape(-1, 1), (labels > 0.5).astype(int))
+    return float(lr.coef_[0, 0]), float(lr.intercept_[0])
+
+
+def _composite_nms_1d(bars, scores, duration, amplitude, min_dist,
+                      alpha=1.0, beta=0.0, gamma=0.0):
+    """NMS using composite ranking: alpha*score + beta*duration + gamma*(-amplitude).
+
+    Nodes are suppressed based on composite rank order, but the returned
+    array preserves the original GNN scores for downstream top-n selection.
+    """
+    if len(bars) == 0:
+        return bars, scores
+    composite = alpha * scores + beta * duration + gamma * (-amplitude)
+    order = np.argsort(-composite)
+    keep = []
+    suppressed = set()
+    for idx in order:
+        if idx in suppressed:
+            continue
+        keep.append(idx)
+        for other in order:
+            if other != idx and other not in suppressed:
+                if abs(int(bars[other]) - int(bars[idx])) < min_dist:
+                    suppressed.add(other)
+    keep = sorted(keep)
+    return bars[keep], scores[keep]
+
+
 def _apply_post_processing(g_scores, g_bars, threshold, nms_dist, top_n,
-                           adaptive_nms_frac=0.0, adaptive_top_n=False):
+                           adaptive_nms_frac=0.0, adaptive_top_n=False,
+                           g_features=None, cnms_alpha=1.0, cnms_beta=0.0,
+                           cnms_gamma=0.0):
     """Apply threshold → NMS → top_n pipeline for one graph.
     
     If adaptive_nms_frac > 0, NMS distance = max(nms_dist, frac × median_spacing)
     where median_spacing is estimated from above-threshold node positions.
     If adaptive_top_n is True, top_n is estimated from window duration and score peaks.
+    If g_features is provided and cnms_beta/cnms_gamma > 0, uses composite NMS
+    ranking with node duration (col 4) and amplitude (col 3) features.
     """
     above = g_scores > threshold
     if above.sum() == 0:
@@ -414,10 +565,21 @@ def _apply_post_processing(g_scores, g_bars, threshold, nms_dist, top_n,
             if np.isfinite(median_spacing):
                 eff_nms = max(nms_dist, int(adaptive_nms_frac * median_spacing))
     
+    # Use composite NMS if features provided and weights are non-zero
+    use_composite = (g_features is not None and (cnms_beta > 0 or cnms_gamma > 0))
     if eff_nms > 0:
-        pred_troughs = nms_1d(cand_bars, cand_scores, eff_nms)
+        if use_composite:
+            cand_dur = g_features[above, 4]   # duration_norm column
+            cand_amp = g_features[above, 3]   # amplitude_norm column
+            pred_troughs, pred_scores = _composite_nms_1d(
+                cand_bars, cand_scores, cand_dur, cand_amp, eff_nms,
+                alpha=cnms_alpha, beta=cnms_beta, gamma=cnms_gamma)
+        else:
+            pred_troughs = nms_1d(cand_bars, cand_scores, eff_nms)
+            pred_scores = None
     else:
         pred_troughs = cand_bars
+        pred_scores = None
     
     # Adaptive top_n: estimate expected boundary count from window span
     eff_top_n = top_n
@@ -432,38 +594,58 @@ def _apply_post_processing(g_scores, g_bars, threshold, nms_dist, top_n,
                 eff_top_n = max(2, int(np.round(window_span / est_breath_period)))
     
     if eff_top_n > 0 and len(pred_troughs) > eff_top_n:
-        pred_scores = np.array([
-            g_scores[np.argmin(np.abs(g_bars - pb))]
-            for pb in pred_troughs
-        ])
-        keep_idx = np.argsort(-pred_scores)[:eff_top_n]
+        if pred_scores is not None:
+            # Use original GNN scores for top-n selection after composite NMS
+            keep_idx = np.argsort(-pred_scores)[:eff_top_n]
+        else:
+            _ps = np.array([
+                g_scores[np.argmin(np.abs(g_bars - pb))]
+                for pb in pred_troughs
+            ])
+            keep_idx = np.argsort(-_ps)[:eff_top_n]
         pred_troughs = np.sort(pred_troughs[keep_idx])
     
     return pred_troughs
 
 
 def _eval_threshold(graph_preds, threshold, nms_dist, top_n, tol_samples, fs=125,
-                    adaptive_nms_frac=0.0, adaptive_top_n=False):
-    """Pure-numpy threshold evaluation on pre-collected predictions."""
+                    adaptive_nms_frac=0.0, adaptive_top_n=False,
+                    cnms_alpha=1.0, cnms_beta=0.0, cnms_gamma=0.0):
+    """Pure-numpy threshold evaluation on pre-collected predictions.
+    
+    graph_preds entries may be (scores, bars, labels) or
+    (scores, bars, labels, features) when composite NMS is used.
+    """
     all_f1s = []
-    for g_scores, g_bars, g_labels in graph_preds:
+    for entry in graph_preds:
+        g_scores, g_bars, g_labels = entry[0], entry[1], entry[2]
+        g_feats = entry[3] if len(entry) > 3 else None
         pred_troughs = _apply_post_processing(
             g_scores, g_bars, threshold, nms_dist, top_n,
             adaptive_nms_frac=adaptive_nms_frac,
-            adaptive_top_n=adaptive_top_n)
+            adaptive_top_n=adaptive_top_n,
+            g_features=g_feats, cnms_alpha=cnms_alpha,
+            cnms_beta=cnms_beta, cnms_gamma=cnms_gamma)
         gt_troughs = g_bars[g_labels > 0.5]
         all_f1s.append(compute_boundary_f1(pred_troughs, gt_troughs, tol_samples))
     return float(np.mean(all_f1s)) if all_f1s else 0.0
 
 
 def optimize_threshold(model, loader, device, tol_samples=75, fs=125,
-                       nms_dist=0, window_breaths=6, adaptive_nms=False):
+                       nms_dist=0, window_breaths=6, adaptive_nms=False,
+                       mc_samples=1, calibration_method='none', calibration_params=None,
+                       composite_nms=False):
     """Search for threshold+NMS+top_n that maximizes boundary F1.
     
     Collects model predictions once, then does fast numpy grid search.
     If adaptive_nms=True, also searches adaptive NMS fraction and adaptive top_n.
+    If composite_nms=True, also searches composite NMS weights (alpha, beta, gamma)
+    using node duration and amplitude features for ranking during NMS.
     """
-    graph_preds = _collect_predictions(model, loader, device)
+    graph_preds = _collect_predictions(model, loader, device, mc_samples=mc_samples,
+                                       calibration_method=calibration_method,
+                                       calibration_params=calibration_params,
+                                       include_features=composite_nms)
     
     best_f1 = 0.0
     best_thresh = 0.5
@@ -471,6 +653,7 @@ def optimize_threshold(model, loader, device, tol_samples=75, fs=125,
     best_top_n = 0
     best_anms_frac = 0.0
     best_atopn = False
+    best_cnms = (1.0, 0.0, 0.0)  # (alpha, beta, gamma)
     
     # NMS fractions to try: 0 = off, 0.3-0.7 = fraction of median breath spacing
     anms_fracs = [0.0]
@@ -479,21 +662,33 @@ def optimize_threshold(model, loader, device, tol_samples=75, fs=125,
         anms_fracs = [0.0, 0.3, 0.4, 0.5, 0.6, 0.7]
         atopn_opts = [False, True]
     
+    # Composite NMS weights to try
+    cnms_configs = [(1.0, 0.0, 0.0)]  # baseline: standard NMS
+    if composite_nms:
+        for ca in [0.85, 0.9, 1.0]:
+            for cb in [0.05, 0.1]:
+                for cg in [0.1, 0.15, 0.2, 0.225]:
+                    cnms_configs.append((ca, cb, cg))
+    
     # Phase 1: coarse grid
     for thresh in np.arange(0.05, 0.90, 0.05):
         for nd in [0, 50, 75, 100, 120, 150, 200]:
             for tn in [0, window_breaths]:
                 for af in anms_fracs:
                     for at in atopn_opts:
-                        f1 = _eval_threshold(graph_preds, thresh, nd, tn, tol_samples, fs,
-                                             adaptive_nms_frac=af, adaptive_top_n=at)
-                        if f1 > best_f1:
-                            best_f1 = f1
-                            best_thresh = float(thresh)
-                            best_nms = int(nd)
-                            best_top_n = int(tn)
-                            best_anms_frac = float(af)
-                            best_atopn = bool(at)
+                        for ca, cb, cg in cnms_configs:
+                            f1 = _eval_threshold(
+                                graph_preds, thresh, nd, tn, tol_samples, fs,
+                                adaptive_nms_frac=af, adaptive_top_n=at,
+                                cnms_alpha=ca, cnms_beta=cb, cnms_gamma=cg)
+                            if f1 > best_f1:
+                                best_f1 = f1
+                                best_thresh = float(thresh)
+                                best_nms = int(nd)
+                                best_top_n = int(tn)
+                                best_anms_frac = float(af)
+                                best_atopn = bool(at)
+                                best_cnms = (ca, cb, cg)
     
     # Phase 2: fine search around best
     fine_anms = [best_anms_frac]
@@ -504,21 +699,35 @@ def optimize_threshold(model, loader, device, tol_samples=75, fs=125,
                      best_anms_frac + 0.05,
                      min(0.9, best_anms_frac + 0.1)]
     
+    fine_cnms = [best_cnms]
+    if composite_nms and (best_cnms[1] > 0 or best_cnms[2] > 0):
+        ba, bb, bg = best_cnms
+        for da in [-0.05, 0, 0.05]:
+            for db in [-0.025, 0, 0.025]:
+                for dg in [-0.025, 0, 0.025]:
+                    c = (ba+da, max(0, bb+db), max(0, bg+dg))
+                    if c not in fine_cnms:
+                        fine_cnms.append(c)
+    
     for thresh in np.arange(max(0.02, best_thresh - 0.10),
                             min(0.95, best_thresh + 0.10), 0.01):
         for nd in range(max(0, best_nms - 30), best_nms + 35, 5):
             for tn in [0, window_breaths]:
                 for af in fine_anms:
-                    f1 = _eval_threshold(graph_preds, thresh, nd, tn, tol_samples, fs,
-                                         adaptive_nms_frac=af, adaptive_top_n=best_atopn)
-                    if f1 > best_f1:
-                        best_f1 = f1
-                        best_thresh = float(thresh)
-                        best_nms = int(nd)
-                        best_top_n = int(tn)
-                        best_anms_frac = float(af)
+                    for ca, cb, cg in fine_cnms:
+                        f1 = _eval_threshold(
+                            graph_preds, thresh, nd, tn, tol_samples, fs,
+                            adaptive_nms_frac=af, adaptive_top_n=best_atopn,
+                            cnms_alpha=ca, cnms_beta=cb, cnms_gamma=cg)
+                        if f1 > best_f1:
+                            best_f1 = f1
+                            best_thresh = float(thresh)
+                            best_nms = int(nd)
+                            best_top_n = int(tn)
+                            best_anms_frac = float(af)
+                            best_cnms = (ca, cb, cg)
     
-    return best_thresh, best_nms, best_f1, best_top_n, best_anms_frac, best_atopn
+    return best_thresh, best_nms, best_f1, best_top_n, best_anms_frac, best_atopn, best_cnms
 
 def make_scheduler(optimizer, config, n_epochs):
     """Create LR scheduler from config."""
@@ -688,34 +897,66 @@ def train(config: dict, train_dir: str, val_dir: str,
     if verbose:
         print(f"  Saved checkpoint to {ckpt_path}")
 
-    # Post-training: optimize threshold + NMS + top_n on validation set
-    # Use CPU for post-processing to avoid gfx1010 GPU hangs
+    # Post-training: calibration + optimize threshold + NMS + top_n
     pp_device = 'cpu'
     model_cpu = model.cpu()
     wb = config.get('window_breaths', 6)
     use_adaptive = config.get('adaptive_nms', False)
-    opt_thresh, opt_nms, opt_f1, opt_top_n, opt_anms_frac, opt_atopn = optimize_threshold(
+    cal_method = config.get('calibration_method', 'none')
+    mc_samples = config.get('mc_samples', 1)
+    cal_params = None
+    
+    # Fit calibration on validation set
+    if cal_method in ('temperature', 'platt'):
+        raw_logits, raw_labels = _collect_raw_logits(
+            model_cpu, val_loader, pp_device, mc_samples=mc_samples)
+        if cal_method == 'temperature':
+            T = learn_temperature(raw_logits, raw_labels)
+            cal_params = {'temperature': T}
+            if verbose:
+                print(f"  Temperature scaling: T={T:.3f}")
+        elif cal_method == 'platt':
+            slope, intercept = fit_platt_scaling(raw_logits, raw_labels)
+            cal_params = {'platt_slope': slope, 'platt_intercept': intercept}
+            if verbose:
+                print(f"  Platt scaling: slope={slope:.3f}, intercept={intercept:.3f}")
+    
+    use_cnms = config.get('composite_nms', False)
+    opt_thresh, opt_nms, opt_f1, opt_top_n, opt_anms_frac, opt_atopn, opt_cnms = optimize_threshold(
         model_cpu, val_loader, pp_device, tol_samples=tol, window_breaths=wb,
-        adaptive_nms=use_adaptive)
+        adaptive_nms=use_adaptive, mc_samples=mc_samples,
+        calibration_method=cal_method, calibration_params=cal_params,
+        composite_nms=use_cnms)
+    opt_ca, opt_cb, opt_cg = opt_cnms
     if verbose:
         extra = ""
         if opt_anms_frac > 0:
             extra += f", anms_frac={opt_anms_frac:.2f}"
         if opt_atopn:
             extra += ", adaptive_top_n=True"
+        if opt_cb > 0 or opt_cg > 0:
+            extra += f", cnms=({opt_ca:.2f},{opt_cb:.3f},{opt_cg:.3f})"
         print(f"  Threshold opt: thresh={opt_thresh:.2f}, nms={opt_nms}, top_n={opt_top_n}{extra}, val_f1={opt_f1:.4f} (was {best_metrics.get('val_f1', 0):.4f})")
 
-    # Re-evaluate with optimized threshold using collected predictions (handles adaptive)
-    val_preds = _collect_predictions(model_cpu, val_loader, pp_device)
+    # Re-evaluate with optimized threshold
+    val_preds = _collect_predictions(model_cpu, val_loader, pp_device,
+                                     mc_samples=mc_samples, calibration_method=cal_method,
+                                     calibration_params=cal_params,
+                                     include_features=use_cnms)
     final_val_f1 = _eval_threshold(val_preds, opt_thresh, opt_nms, opt_top_n, tol,
-                                   adaptive_nms_frac=opt_anms_frac, adaptive_top_n=opt_atopn)
+                                   adaptive_nms_frac=opt_anms_frac, adaptive_top_n=opt_atopn,
+                                   cnms_alpha=opt_ca, cnms_beta=opt_cb, cnms_gamma=opt_cg)
     final_val_rate = evaluate(model_cpu, val_loader, pp_device, threshold=opt_thresh,
                               tol_samples=tol, nms_dist=opt_nms, top_n=opt_top_n)['rate_mae_bpm']
     
     if val_adv_loader:
-        adv_preds = _collect_predictions(model_cpu, val_adv_loader, pp_device)
+        adv_preds = _collect_predictions(model_cpu, val_adv_loader, pp_device,
+                                         mc_samples=mc_samples, calibration_method=cal_method,
+                                         calibration_params=cal_params,
+                                         include_features=use_cnms)
         final_adv_f1 = _eval_threshold(adv_preds, opt_thresh, opt_nms, opt_top_n, tol,
-                                       adaptive_nms_frac=opt_anms_frac, adaptive_top_n=opt_atopn)
+                                       adaptive_nms_frac=opt_anms_frac, adaptive_top_n=opt_atopn,
+                                       cnms_alpha=opt_ca, cnms_beta=opt_cb, cnms_gamma=opt_cg)
         final_adv_rate = evaluate(model_cpu, val_adv_loader, pp_device, threshold=opt_thresh,
                                   tol_samples=tol, nms_dist=opt_nms, top_n=opt_top_n)['rate_mae_bpm']
         final_agg = 0.55 * final_val_f1 + 0.45 * final_adv_f1
@@ -736,7 +977,14 @@ def train(config: dict, train_dir: str, val_dir: str,
             'opt_top_n': opt_top_n,
             'opt_anms_frac': opt_anms_frac,
             'opt_atopn': opt_atopn,
+            'opt_cnms_alpha': opt_ca,
+            'opt_cnms_beta': opt_cb,
+            'opt_cnms_gamma': opt_cg,
+            'calibration_method': cal_method,
+            'mc_samples': mc_samples,
         }
+        if cal_params:
+            best_metrics['calibration_params'] = cal_params
         if final_adv_f1 is not None:
             best_metrics['val_adv_f1'] = final_adv_f1
             best_metrics['val_adv_rate_mae'] = final_adv_rate
@@ -754,6 +1002,9 @@ def train(config: dict, train_dir: str, val_dir: str,
         'opt_top_n': opt_top_n,
         'opt_anms_frac': opt_anms_frac,
         'opt_atopn': opt_atopn,
+        'opt_cnms_alpha': opt_ca,
+        'opt_cnms_beta': opt_cb,
+        'opt_cnms_gamma': opt_cg,
     }
 
 

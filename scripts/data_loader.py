@@ -12,6 +12,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -72,8 +73,16 @@ def load_patient(patient_id: str) -> dict:
     """
     import wfdb
 
-    rec = wfdb.rdrecord(patient_id, pn_dir="bidmc")
-    ann = wfdb.rdann(patient_id, "breath", pn_dir="bidmc")
+    # Use local data if available, fall back to PhysioNet download
+    project_root = Path(os.environ.get("DG_PROJECT_ROOT", Path(__file__).resolve().parent.parent))
+    local_dir = project_root / "data" / "bidmc"
+    local_path = local_dir / patient_id
+    if local_dir.is_dir() and (local_dir / f"{patient_id}.dat").exists():
+        rec = wfdb.rdrecord(str(local_path))
+        ann = wfdb.rdann(str(local_path), "breath")
+    else:
+        rec = wfdb.rdrecord(patient_id, pn_dir="bidmc")
+        ann = wfdb.rdann(patient_id, "breath", pn_dir="bidmc")
 
     signal = np.asarray(rec.p_signal[:, 0], dtype=np.float64)
     fs = int(rec.fs)
