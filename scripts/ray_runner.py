@@ -12,6 +12,9 @@ Usage (standalone):
 Called by metaopt queue infrastructure on the head node.
 """
 
+from __future__ import annotations
+
+import copy
 import sys
 import os
 import json
@@ -23,6 +26,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 # Project root: prefer env override, then cwd, then fallback
 PROJECT_ROOT = Path(os.environ.get('DG_PROJECT_ROOT', os.getcwd()))
+
 
 def get_default_config():
     """Default config for a basic GAT experiment."""
@@ -163,6 +167,7 @@ def run_trial(config: dict) -> dict:
 
     # Format output for metaopt
     best = result.get('best_metrics', {})
+    stage = config.get('dispatch_stage', 'train_gpu')
     output = {
         'boundary_f1_600ms': best.get('boundary_f1_600ms', 0.0),
         'rate_mae_bpm': best.get('rate_mae_bpm', float('inf')),
@@ -173,6 +178,10 @@ def run_trial(config: dict) -> dict:
         'wall_time_seconds': wall_time,
         'n_epochs_run': result.get('n_epochs_run', 0),
         'n_params': result.get('n_params', 0),
+        # Stage provenance
+        'dispatch_stage': stage,
+        '_screening': config.get('_screening', False),
+        '_eval_only': config.get('_eval_only', False),
     }
     if 'val_adv_f1' in best:
         output['by_dataset']['bidmc_val_adversarial'] = best['val_adv_f1']
@@ -194,7 +203,12 @@ def main():
         Path(result_path).write_text(json.dumps(result, indent=2))
         sys.exit(1)
 
-    print(f"Running trial with config: {json.dumps(config, indent=2)}")
+    # Apply stage-aware config shaping (canonical function in dispatch_policy)
+    from dispatch_policy import prepare_stage_config
+    stage = config.get('dispatch_stage', 'train_gpu')
+    config = prepare_stage_config(config, stage)
+
+    print(f"Running trial (stage={stage}) with config: {json.dumps(config, indent=2)}")
 
     try:
         result = run_trial(config)

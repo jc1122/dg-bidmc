@@ -2,9 +2,12 @@
 """Robust Ray trial dispatcher for DG-GNN metaoptimization.
 
 Supports:
-- GPU training on Aorus with crash recovery + CPU fallback
+- Stage-aware dispatch: screen_cpu -> train_gpu -> eval_cpu
+- Generic resource requirements (num_cpus / num_gpus only -- no named hosts)
+- GPU training with crash recovery + CPU fallback
 - CPU-only training on head node (16 cores)
 - Retry logic for transient GPU errors
+- Dry-run manifest generation (no Ray contact)
 - runtime_env packaging with .gitignore bypass
 - Concurrent-safe: each trial gets its own runtime_env sandbox
 
@@ -12,7 +15,10 @@ Usage (on head node):
     source /opt/ray-env/bin/activate
     python3 scripts/dispatch_trial.py --config .ml-metaopt/trial_config.json --out result.json
     python3 scripts/dispatch_trial.py --config '{"arch":"gat","hidden_dim":64}' --out result.json --cpu-only
+    python3 scripts/dispatch_trial.py --config trial.json --out manifest.json --dry-run
 """
+
+from __future__ import annotations
 
 import argparse
 import json
@@ -21,7 +27,6 @@ import shutil
 import sys
 import time
 from pathlib import Path
-import ray
 
 
 def hide_gitignore(project_root: Path):
@@ -51,45 +56,102 @@ def make_runtime_env(project_root: Path) -> dict:
     }
 
 
-@ray.remote
-def run_on_cpu(config_json: str) -> str:
-    """CPU-only training on head node."""
-    import json, os, sys, traceback
-    cwd = os.getcwd()
-    sys.path.insert(0, os.path.join(cwd, "scripts"))
-    config = json.loads(config_json)
-    os.environ["DG_PROJECT_ROOT"] = cwd
+def _resolve_stage(config: dict, cpu_only: bool = False) -> str:
+    """Determine dispatch stage from config and flags.
+
+    Priority: cpu_only flag forces screen_cpu, else use config dispatch_stage.
+    """
     try:
-        from ray_runner import run_trial, get_default_config
-        full = get_default_config()
-        full.update(config)
-        return json.dumps(run_trial(full))
-    except Exception as e:
-        return json.dumps({"error": str(e), "traceback": traceback.format_exc(),
-                           "boundary_f1_600ms": 0.0, "status": "FAILED"})
+        from scripts.dispatch_policy import classify_stage
+    except ImportError:
+        from dispatch_policy import classify_stage
+    if cpu_only:
+        return "screen_cpu"
+    return classify_stage(config)
 
 
-@ray.remote(num_gpus=1, resources={"aorus": 1})
-def run_on_gpu(config_json: str) -> str:
-    """GPU training on Aorus. Falls back to CPU internally on HIP errors."""
-    import json, os, sys, traceback
-    cwd = os.getcwd()
-    sys.path.insert(0, os.path.join(cwd, "scripts"))
-    config = json.loads(config_json)
-    os.environ["DG_PROJECT_ROOT"] = cwd
+def _build_dry_run_manifest(config: dict, stage: str, output_path: Path) -> dict:
+    """Build and persist a dry-run manifest without contacting Ray."""
+    try:
+        from scripts.dispatch_policy import (
+            DispatchPolicy, resources_for_stage, prepare_stage_config,
+        )
+    except ImportError:
+        from dispatch_policy import (
+            DispatchPolicy, resources_for_stage, prepare_stage_config,
+        )
+
+    policy = DispatchPolicy()
+    resources = resources_for_stage(stage, policy)
+    shaped_config = prepare_stage_config(config, stage)
+
+    manifest = {
+        "dry_run": True,
+        "dispatch_stage": stage,
+        "resources": resources,
+        "config": shaped_config,
+        "trial_id": config.get("trial_id", "dry-run-0"),
+    }
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    manifest_json = json.dumps(manifest, indent=2)
+    output_path.write_text(manifest_json)
+    print(manifest_json)
+    return manifest
+
+
+def _run_trial_remote(config_json: str) -> str:
+    """Run a trial inside a Ray worker (CPU or GPU -- resource-agnostic).
+
+    Expects *config_json* to be **already shaped** by
+    ``dispatch_policy.prepare_stage_config`` — no re-shaping is done here.
+    """
+    import json as _json
+    import os as _os
+    import sys as _sys
+    import traceback as _tb
+
+    cwd = _os.getcwd()
+    _sys.path.insert(0, _os.path.join(cwd, "scripts"))
+    _os.environ["DG_PROJECT_ROOT"] = cwd
     try:
         from ray_runner import run_trial, get_default_config
+
+        config = _json.loads(config_json)
         full = get_default_config()
         full.update(config)
-        return json.dumps(run_trial(full))
+        return _json.dumps(run_trial(full))
     except Exception as e:
-        return json.dumps({"error": str(e), "traceback": traceback.format_exc(),
-                           "boundary_f1_600ms": 0.0, "status": "FAILED"})
+        return _json.dumps({
+            "error": str(e),
+            "traceback": _tb.format_exc(),
+            "boundary_f1_600ms": 0.0,
+            "status": "FAILED",
+        })
 
 
 def dispatch(config: dict, project_root: Path, output_path: Path,
-             cpu_only: bool = False, gpu_retries: int = 2):
-    """Submit trial with retry logic."""
+             cpu_only: bool = False, gpu_retries: int = 2,
+             dry_run: bool = False):
+    """Submit trial with stage-aware resource selection and retry logic."""
+    stage = _resolve_stage(config, cpu_only=cpu_only)
+
+    if dry_run:
+        return _build_dry_run_manifest(config, stage, output_path)
+
+    import ray
+    try:
+        from scripts.dispatch_policy import (
+            DispatchPolicy, resources_for_stage, prepare_stage_config,
+        )
+    except ImportError:
+        from dispatch_policy import (
+            DispatchPolicy, resources_for_stage, prepare_stage_config,
+        )
+
+    policy = DispatchPolicy()
+    resources = resources_for_stage(stage, policy)
+
     hide_gitignore(project_root)
     try:
         runtime = make_runtime_env(project_root)
@@ -97,19 +159,28 @@ def dispatch(config: dict, project_root: Path, output_path: Path,
     finally:
         restore_gitignore(project_root)
 
-    config_json = json.dumps(config)
-    print(f"Dispatching trial ({len(config)} keys, cpu_only={cpu_only})")
+    # Shape once — deepcopy, so the caller's dict is never mutated
+    shaped = prepare_stage_config(config, stage)
+    config_json = json.dumps(shaped)
+
+    print(f"Dispatching trial (stage={stage}, resources={resources}, "
+          f"{len(shaped)} config keys)")
+
+    # Build a Ray remote with the resolved generic resources
+    remote_fn = ray.remote(**resources)(_run_trial_remote)
 
     t0 = time.time()
-    if cpu_only:
-        ref = run_on_cpu.remote(config_json)
+    is_gpu = stage == "train_gpu"
+
+    if not is_gpu:
+        ref = remote_fn.remote(config_json)
         result_json = ray.get(ref)
     else:
         last_err = None
         result_json = None
         for attempt in range(gpu_retries + 1):
             try:
-                ref = run_on_gpu.remote(config_json)
+                ref = remote_fn.remote(config_json)
                 result_json = ray.get(ref, timeout=1800)  # 30 min max
                 result = json.loads(result_json)
                 if result.get("status") != "FAILED":
@@ -123,7 +194,9 @@ def dispatch(config: dict, project_root: Path, output_path: Path,
                         continue
                     # Final fallback: CPU
                     print("  All GPU attempts failed, falling back to CPU on head")
-                    ref = run_on_cpu.remote(config_json)
+                    cpu_resources = resources_for_stage("screen_cpu", policy)
+                    cpu_fn = ray.remote(**cpu_resources)(_run_trial_remote)
+                    ref = cpu_fn.remote(config_json)
                     result_json = ray.get(ref, timeout=3600)
                 else:
                     break
@@ -134,16 +207,23 @@ def dispatch(config: dict, project_root: Path, output_path: Path,
                     time.sleep(5)
                     continue
                 print("  Falling back to CPU")
-                ref = run_on_cpu.remote(config_json)
+                cpu_resources = resources_for_stage("screen_cpu", policy)
+                cpu_fn = ray.remote(**cpu_resources)(_run_trial_remote)
+                ref = cpu_fn.remote(config_json)
                 result_json = ray.get(ref, timeout=3600)
             except ray.exceptions.GetTimeoutError:
                 print(f"  Trial timed out on attempt {attempt+1}")
-                result_json = json.dumps({"error": "timeout", "boundary_f1_600ms": 0.0, "status": "FAILED"})
+                result_json = json.dumps({
+                    "error": "timeout",
+                    "boundary_f1_600ms": 0.0,
+                    "status": "FAILED",
+                })
                 break
 
     elapsed = time.time() - t0
     result = json.loads(result_json)
     result["dispatch_wall_time"] = elapsed
+    result["dispatch_stage"] = stage
 
     # Print summary
     print(f"\nCompleted in {elapsed:.1f}s")
@@ -163,12 +243,18 @@ def dispatch(config: dict, project_root: Path, output_path: Path,
 
 
 def main():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--config", required=True, help="JSON file path or inline JSON string")
+    parser = argparse.ArgumentParser(
+        description="Dispatch a DG-GNN trial via Ray with stage-aware resources."
+    )
+    parser.add_argument("--config", required=True,
+                        help="JSON file path or inline JSON string")
     parser.add_argument("--out", required=True, help="Output result JSON path")
-    parser.add_argument("--cpu-only", action="store_true")
+    parser.add_argument("--cpu-only", action="store_true",
+                        help="Force screen_cpu stage regardless of config")
     parser.add_argument("--gpu-retries", type=int, default=2)
     parser.add_argument("--project-root", default="/root/dg_bidmc")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="Print and write manifest JSON without contacting Ray")
     args = parser.parse_args()
 
     # Load config
@@ -178,7 +264,8 @@ def main():
         config = json.loads(args.config)
 
     dispatch(config, Path(args.project_root), Path(args.out),
-             cpu_only=args.cpu_only, gpu_retries=args.gpu_retries)
+             cpu_only=args.cpu_only, gpu_retries=args.gpu_retries,
+             dry_run=args.dry_run)
 
 
 if __name__ == "__main__":
