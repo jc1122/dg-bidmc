@@ -16,8 +16,9 @@ respiratory signals from the BIDMC PhysioNet dataset. The approach:
 4. Train a Graph Attention Network (GAT) to classify nodes as boundaries
 
 **Baseline** (DG-v5 zero-shot, no training): F1 = 0.322 @ ±600ms tolerance  
-**Target**: F1 ≥ 0.70 @ ±600ms tolerance  
-**Evaluation metric**: boundary F1 (precision+recall of trough detection within tolerance)
+**Selection metric**: validation boundary F1 @ ±600ms tolerance  
+**Final reporting**: held-out test boundary F1 @ ±600ms, patient-macro F1 @ ±600ms,
+strict F1 @ ±300ms, and RR MAE/RMSE/bias/LoA
 
 ---
 
@@ -340,7 +341,20 @@ total_loss = bce + 0.3 * type_loss + 0.1 * rate_loss
 
 ## Evaluation
 
-Primary metric: **boundary F1 at ±600ms** (75 samples at 125 Hz)
+Primary selection metric: **boundary F1 at ±600ms** (75 samples at 125 Hz)
+
+Final reporting metrics:
+- **Boundary F1 @ ±600ms** (graph-macro)
+- **Patient-macro Boundary F1 @ ±600ms**
+- **Boundary F1 @ ±300ms** (38 samples at 125 Hz)
+- **Event precision / recall @ ±600ms**
+- **Matched-boundary timing MAE**
+- **Respiratory-rate MAE / RMSE / bias / 95% LoA / correlation**
+
+Rigour note: no published external per-breath trough-boundary benchmark was found
+for BIDMC impedance pneumography with this exact event-matching protocol. Compare
+boundary detection against same-protocol internal baselines (DG-v5, WaveletDenoise,
+BinSeg) and compare RR metrics contextually against the published RR literature.
 
 ```python
 # From scripts/common.py — use directly

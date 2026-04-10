@@ -1,0 +1,121 @@
+{
+  "reviewed_at": "2026-04-10",
+  "protocol": {
+    "selection_metric": "boundary_f1_600ms on validation splits (bidmc_val weighted 0.55, bidmc_val_adversarial weighted 0.45)",
+    "final_report_metric": "held-out test metrics on unseen patients",
+    "note": "Use validation only for model selection. Use held-out test for any claim against baselines or literature."
+  },
+  "primary_metrics": [
+    {
+      "key": "boundary_f1_600ms",
+      "label": "Boundary F1 @ ±600 ms",
+      "role": "primary",
+      "rationale": "Matches the established zero-shot DG-v5 benchmark protocol on BIDMC."
+    },
+    {
+      "key": "patient_macro_f1_600ms",
+      "label": "Patient-macro Boundary F1 @ ±600 ms",
+      "role": "primary",
+      "rationale": "Prevents patients with more windows from dominating the score."
+    },
+    {
+      "key": "boundary_f1_300ms",
+      "label": "Boundary F1 @ ±300 ms",
+      "role": "strict_primary",
+      "rationale": "Stricter timing-sensitive version of the main boundary metric."
+    }
+  ],
+  "secondary_metrics": [
+    {
+      "key": "event_precision_600ms",
+      "label": "Event precision @ ±600 ms"
+    },
+    {
+      "key": "event_recall_600ms",
+      "label": "Event recall @ ±600 ms"
+    },
+    {
+      "key": "boundary_mae_ms_600ms",
+      "label": "Matched-boundary MAE (ms)"
+    },
+    {
+      "key": "rate_mae_bpm",
+      "label": "Respiratory-rate MAE (bpm)"
+    },
+    {
+      "key": "rate_rmse_bpm",
+      "label": "Respiratory-rate RMSE (bpm)"
+    },
+    {
+      "key": "rate_bias_bpm",
+      "label": "Respiratory-rate bias (bpm)"
+    },
+    {
+      "key": "rate_loa_low_bpm",
+      "label": "Respiratory-rate Bland-Altman LoA low (bpm)"
+    },
+    {
+      "key": "rate_loa_high_bpm",
+      "label": "Respiratory-rate Bland-Altman LoA high (bpm)"
+    },
+    {
+      "key": "rate_pearson_r",
+      "label": "Respiratory-rate correlation"
+    }
+  ],
+  "comparison_targets": {
+    "exact_task_same_protocol": {
+      "note": "No published external per-breath trough-boundary benchmark was found for BIDMC impedance pneumography with this exact event-matching protocol. Exact-task comparison is therefore against internal same-dataset baselines.",
+      "baselines": {
+        "dg_v5_zero_shot": {
+          "boundary_f1_600ms": 0.322,
+          "source": "results/real_data_respiratory.json"
+        },
+        "wavelet_denoise_zero_shot": {
+          "boundary_f1_600ms": 0.291,
+          "source": "results/real_data_respiratory.json"
+        },
+        "binseg_zero_shot": {
+          "boundary_f1_600ms": 0.192,
+          "source": "results/real_data_respiratory.json"
+        }
+      }
+    },
+    "contextual_rr_literature": {
+      "charlton_2021_ip_sqi": {
+        "task": "Respiratory-rate estimation from impedance pneumography",
+        "dataset": "BIDMC / MIMIC-derived impedance segments",
+        "reported_metrics": {
+          "sensitivity": 0.777,
+          "specificity": 0.823,
+          "rate_mae_bpm_range": [
+            0.21,
+            0.40
+          ],
+          "high_quality_segment_fraction": 0.349
+        },
+        "comparability": "contextual_only",
+        "note": "Strong RR benchmark, but quality-filtered segments only; not directly comparable to whole-window boundary detection.",
+        "citation": "Charlton PH et al. An impedance pneumography signal quality index: design, assessment and application to respiratory rate monitoring. Biomed Signal Process Control. 2021. DOI:10.1016/j.bspc.2020.102339"
+      },
+      "karlen_2013_capnobase": {
+        "task": "Respiratory-rate estimation benchmark",
+        "dataset": "CapnoBase ECG/PPG benchmark",
+        "reported_metrics": {
+          "rate_mae_bpm_approx": 1.0,
+          "rate_bias_bpm_approx": -0.01,
+          "rate_loa_half_width_bpm_approx": 2.6
+        },
+        "comparability": "contextual_only",
+        "note": "Different sensors and population; useful as a standard RR reporting template, not as an exact task baseline.",
+        "citation": "Karlen W et al. Multiparameter respiratory rate estimation from the photoplethysmogram. IEEE Trans Biomed Eng. 2013."
+      }
+    }
+  },
+  "reporting_rules": [
+    "Do not compare validation scores to literature SOTA.",
+    "Use held-out test metrics for any SOTA or baseline claim.",
+    "Report both graph-macro and patient-macro boundary F1.",
+    "For RR, report MAE, RMSE, bias, and Bland-Altman limits of agreement together."
+  ]
+}

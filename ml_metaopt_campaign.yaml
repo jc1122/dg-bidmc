@@ -4,29 +4,28 @@ goal: >
   Find the best DG-based graph neural network for detecting inhale/exhale trough
   boundaries in ICU impedance pneumography (BIDMC, 125 Hz). Jointly optimize over
   graph construction variants, motifs feature sets, network topology, and training
-  hyperparameters. Primary target: boundary F1 @±600ms ≥ 0.99. Secondary: respiratory
-  rate MAE ≤ 1.0 bpm (to compare against RRest SOTA of 0.21–0.40 bpm from Charlton 2021).
+  hyperparameters. Selection metric: validation boundary F1 @±600ms. Final reporting
+  must use held-out test metrics. Stretch target: validation boundary F1 @±600ms ≥ 0.99.
+  Secondary reporting: respiratory-rate MAE/RMSE/bias/LoA.
 
 # ──────────────────────────────────────────────────────────────────────────────
-# SOTA reference points (from literature survey, 2024-04):
+# Benchmark reference points (reviewed 2026-04-10):
 #
 # Task: per-breath boundary detection on BIDMC impedance pneumography
-# No published per-breath F1 benchmark exists for this exact protocol.
-# Closest published figures:
-#   - Charlton 2021 (IP SQI, BIDMC, quality-filtered segments):
-#       sensitivity 77.7%, specificity 82.3% → implied F1 ≈ 0.800
-#   - Peak detection (supine ICU, unfiltered):
-#       MAE 0.47–1.23 bpm
-#   - DG-v5 zero-shot (our measured baseline):
-#       boundary F1 @600ms = 0.322, adversarial patients ≈ 0.261
-#   - WaveletDenoise (best published zero-shot):
-#       boundary F1 @600ms = 0.291
+# No published external per-breath trough-boundary benchmark was found for this
+# exact event-matching protocol on BIDMC IP. Exact-task comparison is therefore
+# against same-dataset baselines only:
+#   - DG-v5 zero-shot:      boundary F1 @600ms = 0.322
+#   - WaveletDenoise:       boundary F1 @600ms = 0.291
+#   - BinSeg:               boundary F1 @600ms = 0.192
 #
-# For rate estimation (SOTA to beat on secondary metric):
-#   - RRest SQI best: MAE 0.21–0.40 bpm (quality segments only)
-#   - PPG2RespNet 2024: MAE 0.69 bpm (from PPG, different signal)
-#   - Deep learning on IP: MAE ~1.9–2.0 bpm (typical)
-#   Target: MAE ≤ 1.0 bpm whole-signal (beat deep learning SOTA on IP)
+# For respiratory-rate reporting, literature values are contextual rather than
+# exact-task-comparable:
+#   - Charlton 2021 IP SQI: MAE 0.21–0.40 bpm, but only on the 34.9% of segments
+#     passing the high-quality gate; also reports sensitivity 77.7%, specificity 82.3%
+#   - Karlen 2013 CapnoBase benchmark: MAE ≈ 1.0 bpm, bias ≈ -0.01 bpm,
+#     LoA half-width ≈ 2.6 bpm (different sensors / population)
+# Final claims against literature must use held-out test metrics, not validation.
 # ──────────────────────────────────────────────────────────────────────────────
 
 objective:
@@ -38,6 +37,18 @@ objective:
       bidmc_val: 0.55
       bidmc_val_adversarial: 0.45    # weight adversarial heavily — DG's main differentiator
   improvement_threshold: 0.003
+  reporting_metrics:
+    - patient_macro_f1_600ms
+    - boundary_f1_300ms
+    - event_precision_600ms
+    - event_recall_600ms
+    - boundary_mae_ms_600ms
+    - rate_mae_bpm
+    - rate_rmse_bpm
+    - rate_bias_bpm
+    - rate_loa_low_bpm
+    - rate_loa_high_bpm
+    - rate_pearson_r
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Datasets

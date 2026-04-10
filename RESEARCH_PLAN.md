@@ -149,11 +149,16 @@ Run on val set after convergence:
 ### 4.1 — Metrics
 
 Primary:
-- **Boundary F1** at ±600 ms tolerance (matches zero-shot baseline)
-- **Boundary F1** at ±300 ms tolerance (stricter, more clinically relevant)
+- **Boundary F1 @ ±600 ms** (graph-macro, matches the established DG-v5 baseline)
+- **Patient-macro Boundary F1 @ ±600 ms** (prevents patients with many windows from dominating)
+- **Boundary F1 @ ±300 ms** (stricter, more clinically relevant)
 
 Secondary:
-- **Respiratory rate MAE** (breaths/min) — compute from predicted boundaries
+- **Event precision / recall** at ±600 ms
+- **Matched-boundary timing MAE** (ms)
+- **Respiratory rate MAE / RMSE** (breaths/min) — compute from predicted boundaries
+- **Respiratory rate bias + 95% limits of agreement** (Bland-Altman)
+- **Respiratory rate correlation**
 - **Breath type accuracy** (normal/sigh/irregular classification)
 - **Robustness delta**: F1_irregular_rate − F1_regular (DG should be stable; WD degrades)
 
@@ -161,12 +166,18 @@ Secondary:
 
 | Method | Type | Notes |
 |--------|------|-------|
-| DG-GAT (ours) | Trained structural | Target ≥ 0.70 F1 |
-| DG-v5 zero-shot | Zero-shot structural | 0.322 F1 (established baseline) |
-| WaveletDenoise | Classical untrained | 0.291 F1 (best zero-shot SOTA) |
+| DG-GAT (ours) | Trained structural | Compare on **held-out test**, not validation |
+| DG-v5 zero-shot | Zero-shot structural | 0.322 F1 @600ms (same protocol baseline) |
+| WaveletDenoise | Classical untrained | 0.291 F1 @600ms (same protocol baseline) |
 | BinSeg | Classical untrained | 0.192 F1 |
 | CNN-1D trained | Trained baseline | Train same data as DG-GAT for fair comparison |
-| PPG2RespNet style | Trained deep (UNet) | Reference from literature (different signal/task) |
+| Charlton 2021 IP SQI | Literature RR context | MAE 0.21–0.40 bpm on high-quality segments only |
+| Karlen 2013 CapnoBase | Literature RR context | MAE ≈ 1.0 bpm, bias ≈ -0.01, LoA half-width ≈ 2.6 |
+
+**Rigour note:** there is no published external per-breath trough-boundary benchmark
+for BIDMC impedance pneumography with this exact event-matching protocol. Boundary
+claims should therefore be framed against the same-protocol internal baselines above,
+while RR claims can be compared contextually against the published RR literature.
 
 ### 4.3 — Adversarial breakdown
 
@@ -206,10 +217,12 @@ real-time (125 Hz) inference: can DG-GAT run at ≥10 Hz update rate?
 
 | Criterion | Target | Stretch |
 |-----------|--------|---------|
-| Boundary F1 @600ms (test set) | ≥ 0.70 | ≥ 0.80 |
-| Boundary F1 @300ms (test set) | ≥ 0.55 | ≥ 0.70 |
+| Boundary F1 @600ms (held-out test) | ≥ 0.85 | ≥ 0.90 |
+| Patient-macro F1 @600ms (held-out test) | ≥ 0.82 | ≥ 0.88 |
+| Boundary F1 @300ms (held-out test) | ≥ 0.70 | ≥ 0.80 |
 | Irregular-rate robustness delta over WD | ≥ +0.10 | ≥ +0.20 |
-| Rate MAE (breaths/min) | ≤ 2.0 | ≤ 1.0 |
+| Rate MAE (breaths/min, held-out test) | ≤ 1.0 | ≤ 0.7 |
+| Rate RMSE + LoA | report | improve vs prior best |
 | Training patients needed | ≤ 35 | ≤ 15 |
 
 ---

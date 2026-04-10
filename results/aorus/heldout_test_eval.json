@@ -1,38 +1,426 @@
 {
-  "checkpoint": "artifacts/models/best_model_baseline_s789.pt",
-  "checkpoint_sha256": "76907b9ea0170636dcb09a0645518ca26c77e8640f64ec2092a03d6babf110bc",
-  "source": "copied from aorus:/home/jakub/projects/dg_bidmc/data/graphs/checkpoints/best_model_baseline_s789.pt",
-  "architecture": {
-    "arch": "transformer",
-    "in_dim": 6,
-    "edge_dim": 2,
-    "hidden_dim": 64,
-    "n_heads": 8,
-    "n_layers": 5
+  "protocol": {
+    "selection_metric": "boundary_f1_600ms on validation splits",
+    "final_report_metric": "held-out test metrics",
+    "tolerances": {
+      "600ms": 75,
+      "300ms": 38
+    }
   },
-  "post_processing": {
+  "artifact": {
+    "checkpoint": "artifacts/models/best_model_baseline_s789.pt",
+    "checkpoint_sha256": "76907b9ea0170636dcb09a0645518ca26c77e8640f64ec2092a03d6babf110bc",
+    "source": "copied from Aorus best_model_baseline_s789.pt",
+    "config": {
+      "arch": "transformer",
+      "in_dim": 6,
+      "edge_dim": 2,
+      "hidden_dim": 64,
+      "n_heads": 8,
+      "n_layers": 5,
+      "use_rate_head": true,
+      "use_type_head": false,
+      "concat_heads": true,
+      "threshold": 0.05,
+      "nms_dist": 175,
+      "top_n": 6
+    }
+  },
+  "benchmark_targets": {
+    "reviewed_at": "2026-04-10",
+    "protocol": {
+      "selection_metric": "boundary_f1_600ms on validation splits (bidmc_val weighted 0.55, bidmc_val_adversarial weighted 0.45)",
+      "final_report_metric": "held-out test metrics on unseen patients",
+      "note": "Use validation only for model selection. Use held-out test for any claim against baselines or literature."
+    },
+    "primary_metrics": [
+      {
+        "key": "boundary_f1_600ms",
+        "label": "Boundary F1 @ \u00b1600 ms",
+        "role": "primary",
+        "rationale": "Matches the established zero-shot DG-v5 benchmark protocol on BIDMC."
+      },
+      {
+        "key": "patient_macro_f1_600ms",
+        "label": "Patient-macro Boundary F1 @ \u00b1600 ms",
+        "role": "primary",
+        "rationale": "Prevents patients with more windows from dominating the score."
+      },
+      {
+        "key": "boundary_f1_300ms",
+        "label": "Boundary F1 @ \u00b1300 ms",
+        "role": "strict_primary",
+        "rationale": "Stricter timing-sensitive version of the main boundary metric."
+      }
+    ],
+    "secondary_metrics": [
+      {
+        "key": "event_precision_600ms",
+        "label": "Event precision @ \u00b1600 ms"
+      },
+      {
+        "key": "event_recall_600ms",
+        "label": "Event recall @ \u00b1600 ms"
+      },
+      {
+        "key": "boundary_mae_ms_600ms",
+        "label": "Matched-boundary MAE (ms)"
+      },
+      {
+        "key": "rate_mae_bpm",
+        "label": "Respiratory-rate MAE (bpm)"
+      },
+      {
+        "key": "rate_rmse_bpm",
+        "label": "Respiratory-rate RMSE (bpm)"
+      },
+      {
+        "key": "rate_bias_bpm",
+        "label": "Respiratory-rate bias (bpm)"
+      },
+      {
+        "key": "rate_loa_low_bpm",
+        "label": "Respiratory-rate Bland-Altman LoA low (bpm)"
+      },
+      {
+        "key": "rate_loa_high_bpm",
+        "label": "Respiratory-rate Bland-Altman LoA high (bpm)"
+      },
+      {
+        "key": "rate_pearson_r",
+        "label": "Respiratory-rate correlation"
+      }
+    ],
+    "comparison_targets": {
+      "exact_task_same_protocol": {
+        "note": "No published external per-breath trough-boundary benchmark was found for BIDMC impedance pneumography with this exact event-matching protocol. Exact-task comparison is therefore against internal same-dataset baselines.",
+        "baselines": {
+          "dg_v5_zero_shot": {
+            "boundary_f1_600ms": 0.322,
+            "source": "results/real_data_respiratory.json"
+          },
+          "wavelet_denoise_zero_shot": {
+            "boundary_f1_600ms": 0.291,
+            "source": "results/real_data_respiratory.json"
+          },
+          "binseg_zero_shot": {
+            "boundary_f1_600ms": 0.192,
+            "source": "results/real_data_respiratory.json"
+          }
+        }
+      },
+      "contextual_rr_literature": {
+        "charlton_2021_ip_sqi": {
+          "task": "Respiratory-rate estimation from impedance pneumography",
+          "dataset": "BIDMC / MIMIC-derived impedance segments",
+          "reported_metrics": {
+            "sensitivity": 0.777,
+            "specificity": 0.823,
+            "rate_mae_bpm_range": [
+              0.21,
+              0.4
+            ],
+            "high_quality_segment_fraction": 0.349
+          },
+          "comparability": "contextual_only",
+          "note": "Strong RR benchmark, but quality-filtered segments only; not directly comparable to whole-window boundary detection.",
+          "citation": "Charlton PH et al. An impedance pneumography signal quality index: design, assessment and application to respiratory rate monitoring. Biomed Signal Process Control. 2021. DOI:10.1016/j.bspc.2020.102339"
+        },
+        "karlen_2013_capnobase": {
+          "task": "Respiratory-rate estimation benchmark",
+          "dataset": "CapnoBase ECG/PPG benchmark",
+          "reported_metrics": {
+            "rate_mae_bpm_approx": 1.0,
+            "rate_bias_bpm_approx": -0.01,
+            "rate_loa_half_width_bpm_approx": 2.6
+          },
+          "comparability": "contextual_only",
+          "note": "Different sensors and population; useful as a standard RR reporting template, not as an exact task baseline.",
+          "citation": "Karlen W et al. Multiparameter respiratory rate estimation from the photoplethysmogram. IEEE Trans Biomed Eng. 2013."
+        }
+      }
+    },
+    "reporting_rules": [
+      "Do not compare validation scores to literature SOTA.",
+      "Use held-out test metrics for any SOTA or baseline claim.",
+      "Report both graph-macro and patient-macro boundary F1.",
+      "For RR, report MAE, RMSE, bias, and Bland-Altman limits of agreement together."
+    ]
+  },
+  "val": {
+    "n_graphs": 358,
+    "n_patients": 8,
     "threshold": 0.05,
     "nms_dist": 175,
     "top_n": 6,
-    "tol_samples": 75,
-    "fs": 125
-  },
-  "metrics": {
-    "val": {
-      "boundary_f1_600ms": 0.9792111054680889,
-      "rate_mae_bpm": 0.1981399070791619,
-      "n_graphs": 358
+    "boundary_f1_600ms": 0.9792111054680889,
+    "graph_macro_f1_600ms": 0.9792111054680889,
+    "patient_macro_f1_600ms": 0.979570962370431,
+    "event_precision_600ms": 0.9817586529466792,
+    "event_recall_600ms": 0.9771880819366853,
+    "event_f1_600ms": 0.9794680354643024,
+    "matched_events_600ms": 2099,
+    "false_positives_600ms": 39,
+    "false_negatives_600ms": 49,
+    "boundary_mae_samples_600ms": 0.0,
+    "boundary_mae_ms_600ms": 0.0,
+    "boundary_median_ms_600ms": 0.0,
+    "boundary_f1_300ms": 0.9792111054680889,
+    "graph_macro_f1_300ms": 0.9792111054680889,
+    "patient_macro_f1_300ms": 0.979570962370431,
+    "event_precision_300ms": 0.9817586529466792,
+    "event_recall_300ms": 0.9771880819366853,
+    "event_f1_300ms": 0.9794680354643024,
+    "matched_events_300ms": 2099,
+    "false_positives_300ms": 39,
+    "false_negatives_300ms": 49,
+    "boundary_mae_samples_300ms": 0.0,
+    "boundary_mae_ms_300ms": 0.0,
+    "boundary_median_ms_300ms": 0.0,
+    "rate_mae_bpm": 0.1981399070791619,
+    "rate_rmse_bpm": 0.8922286180840643,
+    "rate_bias_bpm": -0.05882281220176159,
+    "rate_loa_low_bpm": -1.803786258304444,
+    "rate_loa_high_bpm": 1.6861406339009208,
+    "rate_pearson_r": 0.9314418412924635,
+    "rate_eval_windows": 358,
+    "by_patient": {
+      "bidmc12": {
+        "n_graphs": 48,
+        "boundary_f1_600ms": 0.97885101010101,
+        "boundary_f1_300ms": 0.97885101010101,
+        "rate_mae_bpm": 0.29881809925391145
+      },
+      "bidmc14": {
+        "n_graphs": 35,
+        "boundary_f1_600ms": 0.9904761904761906,
+        "boundary_f1_300ms": 0.9904761904761906,
+        "rate_mae_bpm": 0.026269568406063877
+      },
+      "bidmc16": {
+        "n_graphs": 49,
+        "boundary_f1_600ms": 0.9675324675324675,
+        "boundary_f1_300ms": 0.9675324675324675,
+        "rate_mae_bpm": 0.2792434475786454
+      },
+      "bidmc17": {
+        "n_graphs": 44,
+        "boundary_f1_600ms": 0.9962121212121212,
+        "boundary_f1_300ms": 0.9962121212121212,
+        "rate_mae_bpm": 8.074349270001139e-17
+      },
+      "bidmc31": {
+        "n_graphs": 45,
+        "boundary_f1_600ms": 0.9811447811447812,
+        "boundary_f1_300ms": 0.9811447811447812,
+        "rate_mae_bpm": 0.12812193521755846
+      },
+      "bidmc36": {
+        "n_graphs": 47,
+        "boundary_f1_600ms": 0.9893617021276596,
+        "boundary_f1_300ms": 0.9893617021276596,
+        "rate_mae_bpm": 0.03026466245552939
+      },
+      "bidmc40": {
+        "n_graphs": 41,
+        "boundary_f1_600ms": 0.9630450849963045,
+        "boundary_f1_300ms": 0.9630450849963045,
+        "rate_mae_bpm": 0.42254114041949703
+      },
+      "bidmc53": {
+        "n_graphs": 49,
+        "boundary_f1_600ms": 0.9699443413729129,
+        "boundary_f1_300ms": 0.9699443413729129,
+        "rate_mae_bpm": 0.356660023820142
+      }
     },
-    "val_adversarial": {
-      "boundary_f1_600ms": 0.9792668621700882,
-      "rate_mae_bpm": 0.1825510257101684,
-      "n_graphs": 310
-    },
-    "test": {
-      "boundary_f1_600ms": 0.9109591056192998,
-      "rate_mae_bpm": 0.5149168217194804,
-      "n_graphs": 412
-    }
+    "loss": 0.06819789669367188
   },
-  "interpretation": "Validation score reproduces exactly; held-out patient test drops materially, so the 0.9792 validation score should not be treated as the generalization estimate."
+  "val_adversarial": {
+    "n_graphs": 310,
+    "n_patients": 7,
+    "threshold": 0.05,
+    "nms_dist": 175,
+    "top_n": 6,
+    "boundary_f1_600ms": 0.9792668621700882,
+    "graph_macro_f1_600ms": 0.9792668621700882,
+    "patient_macro_f1_600ms": 0.9796738126946339,
+    "event_precision_600ms": 0.9816414686825053,
+    "event_recall_600ms": 0.9774193548387097,
+    "event_f1_600ms": 0.9795258620689655,
+    "matched_events_600ms": 1818,
+    "false_positives_600ms": 34,
+    "false_negatives_600ms": 42,
+    "boundary_mae_samples_600ms": 0.0,
+    "boundary_mae_ms_600ms": 0.0,
+    "boundary_median_ms_600ms": 0.0,
+    "boundary_f1_300ms": 0.9792668621700882,
+    "graph_macro_f1_300ms": 0.9792668621700882,
+    "patient_macro_f1_300ms": 0.9796738126946339,
+    "event_precision_300ms": 0.9816414686825053,
+    "event_recall_300ms": 0.9774193548387097,
+    "event_f1_300ms": 0.9795258620689655,
+    "matched_events_300ms": 1818,
+    "false_positives_300ms": 34,
+    "false_negatives_300ms": 42,
+    "boundary_mae_samples_300ms": 0.0,
+    "boundary_mae_ms_300ms": 0.0,
+    "boundary_median_ms_300ms": 0.0,
+    "rate_mae_bpm": 0.1825510257101684,
+    "rate_rmse_bpm": 0.8678890260012397,
+    "rate_bias_bpm": -0.06653854166972185,
+    "rate_loa_low_bpm": -1.7625943734893978,
+    "rate_loa_high_bpm": 1.629517290149954,
+    "rate_pearson_r": 0.9401269209751384,
+    "rate_eval_windows": 310,
+    "by_patient": {
+      "bidmc14": {
+        "n_graphs": 35,
+        "boundary_f1_600ms": 0.9904761904761906,
+        "boundary_f1_300ms": 0.9904761904761906,
+        "rate_mae_bpm": 0.026269568406063877
+      },
+      "bidmc16": {
+        "n_graphs": 49,
+        "boundary_f1_600ms": 0.9675324675324675,
+        "boundary_f1_300ms": 0.9675324675324675,
+        "rate_mae_bpm": 0.2792434475786454
+      },
+      "bidmc17": {
+        "n_graphs": 44,
+        "boundary_f1_600ms": 0.9962121212121212,
+        "boundary_f1_300ms": 0.9962121212121212,
+        "rate_mae_bpm": 8.074349270001139e-17
+      },
+      "bidmc31": {
+        "n_graphs": 45,
+        "boundary_f1_600ms": 0.9811447811447812,
+        "boundary_f1_300ms": 0.9811447811447812,
+        "rate_mae_bpm": 0.12812193521755846
+      },
+      "bidmc36": {
+        "n_graphs": 47,
+        "boundary_f1_600ms": 0.9893617021276596,
+        "boundary_f1_300ms": 0.9893617021276596,
+        "rate_mae_bpm": 0.03026466245552939
+      },
+      "bidmc40": {
+        "n_graphs": 41,
+        "boundary_f1_600ms": 0.9630450849963045,
+        "boundary_f1_300ms": 0.9630450849963045,
+        "rate_mae_bpm": 0.42254114041949703
+      },
+      "bidmc53": {
+        "n_graphs": 49,
+        "boundary_f1_600ms": 0.9699443413729129,
+        "boundary_f1_300ms": 0.9699443413729129,
+        "rate_mae_bpm": 0.356660023820142
+      }
+    },
+    "loss": 0.06330031774217082
+  },
+  "test": {
+    "n_graphs": 412,
+    "n_patients": 10,
+    "threshold": 0.05,
+    "nms_dist": 175,
+    "top_n": 6,
+    "boundary_f1_600ms": 0.9109591056192998,
+    "graph_macro_f1_600ms": 0.9109591056192998,
+    "patient_macro_f1_600ms": 0.9131554501368744,
+    "event_precision_600ms": 0.9094967532467533,
+    "event_recall_600ms": 0.9139477977161501,
+    "event_f1_600ms": 0.9117168429617575,
+    "matched_events_600ms": 2241,
+    "false_positives_600ms": 223,
+    "false_negatives_600ms": 211,
+    "boundary_mae_samples_600ms": 0.3485051316376618,
+    "boundary_mae_ms_600ms": 2.7880410531012942,
+    "boundary_median_ms_600ms": 0.0,
+    "boundary_f1_300ms": 0.9064724919093852,
+    "graph_macro_f1_300ms": 0.9064724919093852,
+    "patient_macro_f1_300ms": 0.9078813257451028,
+    "event_precision_300ms": 0.9050324675324676,
+    "event_recall_300ms": 0.9094616639477977,
+    "event_f1_300ms": 0.9072416598860863,
+    "matched_events_300ms": 2230,
+    "false_positives_300ms": 234,
+    "false_negatives_300ms": 222,
+    "boundary_mae_samples_300ms": 0.0,
+    "boundary_mae_ms_300ms": 0.0,
+    "boundary_median_ms_300ms": 0.0,
+    "rate_mae_bpm": 0.5149168217194804,
+    "rate_rmse_bpm": 1.4399317733888197,
+    "rate_bias_bpm": 0.23106086809131082,
+    "rate_loa_low_bpm": -2.554632451365373,
+    "rate_loa_high_bpm": 3.016754187547994,
+    "rate_pearson_r": 0.9171828488494057,
+    "rate_eval_windows": 412,
+    "by_patient": {
+      "bidmc11": {
+        "n_graphs": 37,
+        "boundary_f1_600ms": 0.8882063882063883,
+        "boundary_f1_300ms": 0.8697788697788698,
+        "rate_mae_bpm": 0.9702921922728355
+      },
+      "bidmc13": {
+        "n_graphs": 52,
+        "boundary_f1_600ms": 0.9868881118881119,
+        "boundary_f1_300ms": 0.9868881118881119,
+        "rate_mae_bpm": 0.1695548263293805
+      },
+      "bidmc15": {
+        "n_graphs": 37,
+        "boundary_f1_600ms": 0.9340704340704341,
+        "boundary_f1_300ms": 0.9340704340704341,
+        "rate_mae_bpm": 0.3437601158226135
+      },
+      "bidmc19": {
+        "n_graphs": 38,
+        "boundary_f1_600ms": 0.9298245614035089,
+        "boundary_f1_300ms": 0.9298245614035089,
+        "rate_mae_bpm": 0.5175448802353836
+      },
+      "bidmc24": {
+        "n_graphs": 57,
+        "boundary_f1_600ms": 0.7585858585858585,
+        "boundary_f1_300ms": 0.7585858585858585,
+        "rate_mae_bpm": 1.792804471059118
+      },
+      "bidmc25": {
+        "n_graphs": 40,
+        "boundary_f1_600ms": 0.9708333333333334,
+        "boundary_f1_300ms": 0.9708333333333334,
+        "rate_mae_bpm": 0.055410942484601475
+      },
+      "bidmc27": {
+        "n_graphs": 27,
+        "boundary_f1_600ms": 0.9814814814814816,
+        "boundary_f1_300ms": 0.9814814814814816,
+        "rate_mae_bpm": 0.0836868557203678
+      },
+      "bidmc29": {
+        "n_graphs": 48,
+        "boundary_f1_600ms": 0.9930555555555555,
+        "boundary_f1_300ms": 0.9930555555555555,
+        "rate_mae_bpm": 0.0674387415020777
+      },
+      "bidmc44": {
+        "n_graphs": 42,
+        "boundary_f1_600ms": 0.9484126984126985,
+        "boundary_f1_300ms": 0.9484126984126985,
+        "rate_mae_bpm": 0.25868380393100326
+      },
+      "bidmc46": {
+        "n_graphs": 34,
+        "boundary_f1_600ms": 0.7401960784313725,
+        "boundary_f1_300ms": 0.7058823529411765,
+        "rate_mae_bpm": 0.4198418152769522
+      }
+    },
+    "loss": 0.09003701552893352
+  },
+  "aggregate_f1_600ms": 0.9792361959839886,
+  "aggregate_patient_macro_f1_600ms": 0.9796172450163223,
+  "interpretation": "Validation reproduces the reported 0.9792 score, but held-out patient test drops to 0.9110 F1 and 0.5149 bpm MAE. Use test, not validation, for any external comparison."
 }

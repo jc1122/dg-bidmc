@@ -72,6 +72,35 @@ For respiratory signals at 125 Hz: add **LP filter at 2 Hz** before DG
 F1 tolerance: ±600 ms. These are **zero-shot** results — DG was never trained on
 respiratory data. With domain-specific GNN training, we expect 0.65–0.85.
 
+### Current rigorous evaluation protocol
+
+The project now uses a stricter reporting split between **model selection** and
+**final comparison**:
+
+| Stage | Metric | Purpose |
+|------|--------|---------|
+| Validation | Boundary F1 @ ±600 ms | Hyperparameter / architecture selection |
+| Held-out test | Boundary F1 @ ±600 ms | Main comparison metric |
+| Held-out test | Patient-macro F1 @ ±600 ms | Prevent patient imbalance from hiding failures |
+| Held-out test | Boundary F1 @ ±300 ms | Stricter timing-sensitive metric |
+| Held-out test | Event precision / recall | Error mode analysis |
+| Held-out test | Boundary timing MAE (ms) | Localization quality |
+| Held-out test | Rate MAE / RMSE / bias / LoA / correlation | RR literature comparison |
+
+**Important:** there is no published external per-breath trough-boundary benchmark
+for BIDMC impedance pneumography with this exact matching protocol. For boundary
+detection, the rigorous same-task baselines are therefore the internal classical
+methods above (**DG-v5 0.322, WaveletDenoise 0.291, BinSeg 0.192**). Published
+literature comparisons are most rigorous for the **rate** metrics, not for the
+exact trough-boundary F1 task.
+
+The preserved best validation checkpoint currently reproduces:
+- **Validation:** F1@600ms = 0.9792, rate MAE = 0.198 bpm
+- **Held-out test:** F1@600ms = 0.9110, rate MAE = 0.5149 bpm
+
+So the honest generalization estimate is the **held-out test** score, not the
+validation peak.
+
 ---
 
 ## Dataset
