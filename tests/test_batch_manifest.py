@@ -6,10 +6,14 @@ import json
 import subprocess
 import sys
 
+from pathlib import Path
+
 import pytest
 
 from scripts.build_batch_manifest import build_batch_manifest
 from scripts.dispatch_policy import DispatchPolicy
+
+_PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 
 
 @pytest.fixture()
@@ -95,36 +99,42 @@ def test_config_preserved_in_trial(policy: DispatchPolicy) -> None:
     assert manifest["trials"][0]["config"] == cfg
 
 
+def test_config_is_deep_copied(policy: DispatchPolicy) -> None:
+    """Stored config must be a copy — mutating the original must not affect the manifest."""
+    cfg = {"trial_id": "x1", "dispatch_stage": "screen_cpu", "nested": {"a": 1}}
+    manifest = build_batch_manifest("c", 0, [cfg], policy)
+    stored = manifest["trials"][0]["config"]
+
+    # Must be equal but not the same object
+    assert stored == cfg
+    assert stored is not cfg
+    assert stored["nested"] is not cfg["nested"]
+
+    # Mutating the original must not affect the stored copy
+    cfg["nested"]["a"] = 999
+    assert stored["nested"]["a"] == 1
+
+
 # --- CLI ---
 
 
-def test_cli_prints_json(policy: DispatchPolicy) -> None:
+def test_cli_prints_json(tmp_path: object, policy: DispatchPolicy) -> None:
     """The script should accept a JSON file and print a manifest."""
-    import os
-    import tempfile
-
     configs = [
         {"trial_id": "c1", "dispatch_stage": "screen_cpu"},
         {"trial_id": "c2", "dispatch_stage": "train_gpu"},
     ]
-    # Write config to a file in the project directory
-    cfg_path = os.path.join(
-        os.path.dirname(os.path.dirname(__file__)), "_test_cli_configs.json"
-    )
-    try:
-        with open(cfg_path, "w") as f:
-            json.dump(configs, f)
+    cfg_path = str(tmp_path / "cli_configs.json")  # type: ignore[operator]
+    with open(cfg_path, "w") as f:
+        json.dump(configs, f)
 
-        result = subprocess.run(
-            [sys.executable, "-m", "scripts.build_batch_manifest",
-             "--campaign-id", "cli-test", "--iteration", "5", cfg_path],
-            capture_output=True, text=True,
-            cwd=os.path.dirname(os.path.dirname(__file__)),
-        )
-        assert result.returncode == 0, result.stderr
-        manifest = json.loads(result.stdout)
-        assert manifest["batch_id"] == "cli-test-iter5-batch1"
-        assert len(manifest["trials"]) == 2
-    finally:
-        if os.path.exists(cfg_path):
-            os.remove(cfg_path)
+    result = subprocess.run(
+        [sys.executable, "-m", "scripts.build_batch_manifest",
+         "--campaign-id", "cli-test", "--iteration", "5", cfg_path],
+        capture_output=True, text=True,
+        cwd=_PROJECT_ROOT,
+    )
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads(result.stdout)
+    assert manifest["batch_id"] == "cli-test-iter5-batch1"
+    assert len(manifest["trials"]) == 2

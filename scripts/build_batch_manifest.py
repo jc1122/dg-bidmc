@@ -8,6 +8,7 @@ that the remote execution path can consume directly.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import sys
 
@@ -33,7 +34,7 @@ def build_batch_manifest(
         trials.append(
             {
                 "trial_id": config["trial_id"],
-                "config": config,
+                "config": copy.deepcopy(config),
                 "entrypoint": entrypoint,
                 "resources": resources_for_stage(stage, policy),
             }
