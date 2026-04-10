@@ -133,6 +133,28 @@ class TestPromotionCandidates:
     def test_none_qualify(self, results):
         assert promotion_candidates(results, min_score=0.99, top_k=5) == []
 
+    def test_missing_key_treated_as_zero(self):
+        """Entries lacking boundary_f1_600ms default to 0 in both filter and sort."""
+        data = [
+            {"config": {"lr": 0.01}, "boundary_f1_600ms": 0.50},
+            {"config": {"lr": 0.02}},  # missing key
+        ]
+        # min_score > 0 filters out the missing-key entry
+        out = promotion_candidates(data, min_score=0.1, top_k=10)
+        assert len(out) == 1
+        assert out[0]["boundary_f1_600ms"] == 0.50
+
+    def test_missing_key_admitted_at_zero_threshold(self):
+        """With min_score=0, missing-key entries pass filter and sort without KeyError."""
+        data = [
+            {"config": {"lr": 0.01}, "boundary_f1_600ms": 0.50},
+            {"config": {"lr": 0.02}},  # missing key, defaults to 0
+        ]
+        out = promotion_candidates(data, min_score=0, top_k=10)
+        assert len(out) == 2
+        assert out[0]["boundary_f1_600ms"] == 0.50
+        assert "boundary_f1_600ms" not in out[1]
+
 
 # ---------------------------------------------------------------------------
 # DispatchPolicy defaults

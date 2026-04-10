@@ -65,5 +65,5 @@ def promotion_candidates(
     and returns at most *top_k* entries.
     """
     qualified = [r for r in screen_results if r.get("boundary_f1_600ms", 0) >= min_score]
-    qualified.sort(key=lambda r: r["boundary_f1_600ms"], reverse=True)
+    qualified.sort(key=lambda r: r.get("boundary_f1_600ms", 0), reverse=True)
     return qualified[:top_k]
