@@ -8,7 +8,7 @@ The project currently behaves like a single-lane remote optimizer:
 - the campaign uses `trial_budget: 1`, so only one remote training trial is issued per iteration
 - the recorded remote manifest requests `{"num_gpus": 1, "aorus": 1}`, which assumes a named GPU host and does not fit a shared autoscaled Ray cluster
 
-This is too conservative for a cluster that may include multiple Hetzner cx53 nodes plus one shared GPU host, and it is unfriendly to running three projects concurrently on the same Ray deployment.
+This is too conservative for a shared Ray deployment that may include multiple Hetzner cx53 nodes plus one shared GPU host, and it is unfriendly to running three projects concurrently on the same deployment.
 
 ## Goal
 
@@ -18,6 +18,7 @@ Rework this project’s dispatch so it:
 2. does not depend on named workers or named host resources
 3. coexists fairly with other projects on the same Ray cluster
 4. uses CPU capacity broadly for screening and reserves GPU for promoted candidates
+5. is implemented as **project-local changes only**; actual remote job dispatch remains delegated through the Hetzner delegation path rather than attempting to reconfigure the autoscaler from this repository
 
 ## Recommended approach
 
@@ -89,6 +90,17 @@ This project must not encode host identity into manifests or dispatcher defaults
 - evaluation/post-processing jobs: CPU-only
 
 Ray and the autoscaler choose placement.
+
+### Local control only
+
+This spec changes only this repository:
+
+- campaign config
+- local dispatch helpers
+- manifest generation
+- promotion rules
+
+It does **not** attempt to modify the autoscaler or cluster topology. Remote work is still handed off through the existing delegation / queue path. In operational terms, this repo should prepare better manifests and dispatch classes, then use the Hetzner delegation workflow to run them remotely.
 
 ### Fair-share controls
 
@@ -172,6 +184,8 @@ This should become the place that expresses job class and generic resource reque
 - GPU promotion jobs -> generic GPU remote function
 - no named resource labels
 
+This file remains a project-local launcher helper. When remote execution is requested from the agent workflow, it should be invoked through the existing Hetzner delegation path rather than by trying to mutate cluster-wide scheduler behavior from inside this repo.
+
 ### metaopt / manifest generation
 
 Manifest generation should emit job class and resource class explicitly. The current recorded manifest hardcodes:
@@ -184,6 +198,15 @@ Manifest generation should emit job class and resource class explicitly. The cur
 ```
 
 That must be replaced with generic GPU requests only.
+
+The resulting manifests are the contract handed to the remote execution path. They should describe:
+
+- dispatch class
+- generic resource requirements
+- concurrency caps
+- promotion provenance
+
+They should not describe machine identity.
 
 ## Failure handling
 
@@ -200,6 +223,7 @@ Add focused tests for:
 2. manifest resource generation
 3. promotion logic
 4. generic GPU manifest generation without named resource labels
+5. delegated-run payload generation that remains project-local and does not assume autoscaler ownership
 
 Smoke checks:
 
