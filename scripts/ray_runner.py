@@ -105,25 +105,24 @@ def run_trial(config: dict) -> dict:
     """Run one training trial. Returns result dict.
     
     GPU-robust: catches HIP/CUDA errors and retries on CPU if needed.
+    Supports ensemble mode via config['n_ensemble'] > 1.
     """
-    from train import train
+    n_ensemble = config.get('n_ensemble', 1)
+    if n_ensemble > 1:
+        from train import train_ensemble as train_fn
+    else:
+        from train import train as train_fn
 
     # Data directories on the worker
     train_dir = str(PROJECT_ROOT / 'data' / 'graphs' / 'train')
     val_dir = str(PROJECT_ROOT / 'data' / 'graphs' / 'val')
     val_adv_dir = str(PROJECT_ROOT / 'data' / 'graphs' / 'val_adversarial')
 
-    # Check data exists
-    for d in [train_dir, val_dir]:
-        if not Path(d).exists() or not list(Path(d).glob('*.pt')):
-            return {
-                'boundary_f1_600ms': 0.0,
-                'rate_mae_bpm': float('inf'),
-                'error': f'No data in {d}',
-                'status': 'FAILED',
-            }
+    # Ensure data directories exist (train() rebuilds graphs if empty)
+    for d in [train_dir, val_dir, val_adv_dir]:
+        Path(d).mkdir(parents=True, exist_ok=True)
 
-    if not Path(val_adv_dir).exists() or not list(Path(val_adv_dir).glob('*.pt')):
+    if not Path(val_adv_dir).exists():
         val_adv_dir = None
 
     device = 'cpu'
@@ -141,7 +140,7 @@ def run_trial(config: dict) -> dict:
     max_gpu_retries = 2
     for attempt in range(max_gpu_retries + 1):
         try:
-            result = train(config, train_dir, val_dir, val_adv_dir,
+            result = train_fn(config, train_dir, val_dir, val_adv_dir,
                          device=device, verbose=True)
             break
         except RuntimeError as e:
