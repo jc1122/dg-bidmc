@@ -19,6 +19,26 @@ from torch_geometric.loader import DataLoader
 from model import build_model, count_parameters
 from graph_features import compute_feature_dims, cache_split_graphs
 
+
+def focal_loss_with_logits(logits, targets, alpha=0.25, gamma=2.0, pos_weight=None):
+    """Focal loss for binary classification (operates on logits).
+    
+    Reduces relative loss for well-classified examples, focusing training
+    on hard negatives/positives. Compatible with class imbalance via pos_weight.
+    """
+    if pos_weight is not None:
+        weight = torch.where(targets >= 0.5, pos_weight, torch.ones_like(targets))
+    else:
+        weight = torch.ones_like(targets)
+    
+    bce = F.binary_cross_entropy_with_logits(logits, targets, reduction='none')
+    p = torch.sigmoid(logits)
+    pt = torch.where(targets >= 0.5, p, 1 - p)
+    focal_weight = alpha * (1 - pt) ** gamma
+    loss = (focal_weight * weight * bce).mean()
+    return loss
+
+
 def load_cached_graphs(data_dir: str) -> list:
     """Load all .pt files from a directory."""
     from torch_geometric.data import Data
@@ -127,9 +147,13 @@ def train_one_epoch(model, loader, optimizer, config, device):
     total_loss = 0
     n_graphs = 0
     
-    pos_weight = torch.tensor(config.get('pos_weight', 7.0), device=device)
+    pw_val = config.get('pos_weight', 7.0)
+    pos_weight = torch.tensor(pw_val, device=device)
     rate_w = config.get('loss_rate_weight', 0.0)
     type_w = config.get('loss_type_weight', 0.0)
+    use_focal = config.get('boundary_loss', 'bce') == 'focal'
+    focal_gamma = config.get('focal_gamma', 2.0)
+    focal_alpha = config.get('focal_alpha', 0.25)
     
     for batch in loader:
         try:
@@ -141,8 +165,13 @@ def train_one_epoch(model, loader, optimizer, config, device):
                          batch=batch.batch if hasattr(batch, 'batch') else None)
             
             # Boundary loss (main)
-            bce = F.binary_cross_entropy_with_logits(
-                out['boundary_logits'], batch.y, pos_weight=pos_weight)
+            if use_focal:
+                bce = focal_loss_with_logits(
+                    out['boundary_logits'], batch.y,
+                    alpha=focal_alpha, gamma=focal_gamma, pos_weight=pos_weight)
+            else:
+                bce = F.binary_cross_entropy_with_logits(
+                    out['boundary_logits'], batch.y, pos_weight=pos_weight)
             
             loss = bce
             
@@ -178,8 +207,13 @@ def train_one_epoch(model, loader, optimizer, config, device):
                     out = model(batch.x, batch.edge_index,
                                  edge_attr=batch.edge_attr if hasattr(batch, 'edge_attr') else None,
                                  batch=batch.batch if hasattr(batch, 'batch') else None)
-                    bce = F.binary_cross_entropy_with_logits(
-                        out['boundary_logits'], batch.y, pos_weight=pos_weight)
+                    if use_focal:
+                        bce = focal_loss_with_logits(
+                            out['boundary_logits'], batch.y,
+                            alpha=focal_alpha, gamma=focal_gamma, pos_weight=pos_weight)
+                    else:
+                        bce = F.binary_cross_entropy_with_logits(
+                            out['boundary_logits'], batch.y, pos_weight=pos_weight)
                     loss = bce
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
