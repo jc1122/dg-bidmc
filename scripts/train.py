@@ -228,7 +228,26 @@ def train_one_epoch(model, loader, optimizer, config, device):
     return total_loss / max(n_graphs, 1), device
 
 @torch.no_grad()
-def evaluate(model, loader, device, threshold=0.5, tol_samples=75, fs=125):
+def nms_1d(bars, scores, min_dist):
+    """Non-max suppression: keep highest-score node within each min_dist window."""
+    if len(bars) == 0:
+        return bars
+    order = np.argsort(-scores)
+    keep = []
+    suppressed = set()
+    for idx in order:
+        if idx in suppressed:
+            continue
+        keep.append(idx)
+        for other in order:
+            if other != idx and abs(int(bars[other]) - int(bars[idx])) < min_dist:
+                suppressed.add(other)
+    return bars[sorted(keep)]
+
+
+@torch.no_grad()
+def evaluate(model, loader, device, threshold=0.5, tol_samples=75, fs=125,
+             nms_dist=0):
     """Evaluate model on a data loader. Returns dict with metrics."""
     model.eval()
     all_f1s = []
@@ -260,7 +279,11 @@ def evaluate(model, loader, device, threshold=0.5, tol_samples=75, fs=125):
             g_bars = node_bars[mask]
             g_labels = labels[mask]
             
-            pred_troughs = g_bars[g_scores > threshold]
+            above = g_scores > threshold
+            if nms_dist > 0 and above.sum() > 0:
+                pred_troughs = nms_1d(g_bars[above], g_scores[above], nms_dist)
+            else:
+                pred_troughs = g_bars[above]
             gt_troughs = g_bars[g_labels > 0.5]
             
             f1 = compute_boundary_f1(pred_troughs, gt_troughs, tol_samples)
@@ -276,6 +299,23 @@ def evaluate(model, loader, device, threshold=0.5, tol_samples=75, fs=125):
         'loss': total_loss / max(n_graphs, 1),
         'n_graphs': n_graphs,
     }
+
+
+def optimize_threshold(model, loader, device, tol_samples=75, fs=125,
+                       nms_dist=0):
+    """Search for the threshold+NMS that maximizes boundary F1 on a loader."""
+    best_f1 = 0.0
+    best_thresh = 0.5
+    best_nms = nms_dist
+    for thresh in np.arange(0.20, 0.80, 0.05):
+        for nd in ([0, 30, 50, 75, 100] if nms_dist == 0 else [nms_dist]):
+            metrics = evaluate(model, loader, device, threshold=thresh,
+                               tol_samples=tol_samples, fs=fs, nms_dist=nd)
+            if metrics['boundary_f1_600ms'] > best_f1:
+                best_f1 = metrics['boundary_f1_600ms']
+                best_thresh = float(thresh)
+                best_nms = int(nd)
+    return best_thresh, best_nms, best_f1
 
 def make_scheduler(optimizer, config, n_epochs):
     """Create LR scheduler from config."""
@@ -430,10 +470,44 @@ def train(config: dict, train_dir: str, val_dir: str,
                 print(f"  Early stopping at epoch {epoch} (no improve for {patience} epochs)")
             break
     
+    # Post-training: optimize threshold + NMS on validation set
+    opt_thresh, opt_nms, opt_f1 = optimize_threshold(
+        model, val_loader, device, tol_samples=tol)
+    if verbose:
+        print(f"  Threshold opt: thresh={opt_thresh:.2f}, nms={opt_nms}, val_f1={opt_f1:.4f} (was {best_metrics.get('val_f1', 0):.4f})")
+
+    # Re-evaluate with optimized threshold
+    final_val = evaluate(model, val_loader, device, threshold=opt_thresh,
+                         tol_samples=tol, nms_dist=opt_nms)
+    final_adv = evaluate(model, val_adv_loader, device, threshold=opt_thresh,
+                         tol_samples=tol, nms_dist=opt_nms) if val_adv_loader else {}
+    if final_adv:
+        final_agg = 0.55 * final_val['boundary_f1_600ms'] + 0.45 * final_adv['boundary_f1_600ms']
+    else:
+        final_agg = final_val['boundary_f1_600ms']
+
+    if final_agg > best_val_f1:
+        best_val_f1 = final_agg
+        best_metrics = {
+            'boundary_f1_600ms': final_agg,
+            'val_f1': final_val['boundary_f1_600ms'],
+            'rate_mae_bpm': final_val['rate_mae_bpm'],
+            'epoch': best_metrics.get('epoch', len(history) - 1),
+            'opt_threshold': opt_thresh,
+            'opt_nms_dist': opt_nms,
+        }
+        if final_adv:
+            best_metrics['val_adv_f1'] = final_adv['boundary_f1_600ms']
+            best_metrics['val_adv_rate_mae'] = final_adv['rate_mae_bpm']
+        if verbose:
+            print(f"  ★ Post-opt improved: agg_f1={final_agg:.4f}")
+
     return {
         'best_val_f1': best_val_f1,
         'best_metrics': best_metrics,
         'history': history,
         'n_epochs_run': len(history),
         'n_params': count_parameters(model),
+        'opt_threshold': opt_thresh,
+        'opt_nms_dist': opt_nms,
     }

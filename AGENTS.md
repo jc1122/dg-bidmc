@@ -1,11 +1,3 @@
-<!-- ml-metaoptimization:begin -->
-## Active task
-`.ml-metaopt/state.json` exists. Inspect its `status`.
-If `status` is `RUNNING`, invoke the `ml-metaoptimization` skill immediately,
-resume from `machine_state`, and do not ask the user for campaign inputs.
-If `status` is terminal, remove this block, stop auto-resuming, and surface `next_action` to the operator without executing from it.
-<!-- ml-metaoptimization:end -->
-
 # DG-BIDMC Agent Context
 
 This file provides complete context for a coding agent working on the
