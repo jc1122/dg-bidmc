@@ -4,7 +4,7 @@ goal: >
   Find the best DG-based graph neural network for detecting inhale/exhale trough
   boundaries in ICU impedance pneumography (BIDMC, 125 Hz). Jointly optimize over
   graph construction variants, motifs feature sets, network topology, and training
-  hyperparameters. Primary target: boundary F1 @±600ms ≥ 0.95. Secondary: respiratory
+  hyperparameters. Primary target: boundary F1 @±600ms ≥ 0.99. Secondary: respiratory
   rate MAE ≤ 1.0 bpm (to compare against RRest SOTA of 0.21–0.40 bpm from Charlton 2021).
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -77,9 +77,9 @@ baseline:
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Stop conditions
-# target_metric = 0.95 — beats all known SOTA by a wide margin.
-# Note: annotation-quality ceiling estimated at ~0.85–0.90 from RESEARCH_PLAN.md;
-# 0.95 may require ensemble or post-processing strategies discovered during campaign.
+# target_metric = 0.99 — push beyond SOTA and verify approach ceiling.
+# Per-graph optimal PP ceiling measured at 0.9888 (error_analysis.json).
+# Reaching 0.99 requires model-level improvements, not just post-processing.
 # max_iterations = 60 — generous for full joint search (arch + features + hyperparams)
 # max_no_improve = 8 — allow TPE to explore before concluding (large search space)
 # ──────────────────────────────────────────────────────────────────────────────

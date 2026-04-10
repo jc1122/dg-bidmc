@@ -889,6 +889,51 @@ def train(config: dict, train_dir: str, val_dir: str,
         model.load_state_dict(best_model_state)
         model.to(device)
 
+    # --- SWA phase (optional) ---
+    swa_start = config.get('swa_start_epoch', 0)
+    swa_epochs = config.get('swa_epochs', 0)
+    if swa_epochs > 0 and swa_start > 0:
+        from torch.optim.swa_utils import AveragedModel, SWALR, update_bn
+        swa_lr = config.get('swa_lr', 1e-4)
+        swa_model = AveragedModel(model)
+        swa_scheduler = SWALR(optimizer, swa_lr=swa_lr)
+        # Reset optimizer LR
+        for pg in optimizer.param_groups:
+            pg['lr'] = lr
+        if verbose:
+            print(f"  SWA phase: {swa_epochs} epochs, swa_lr={swa_lr:.1e}")
+        for swa_ep in range(swa_epochs):
+            t0_swa = time.time()
+            train_loss_swa, device = train_one_epoch(model, train_loader, optimizer, config, device)
+            swa_model.update_parameters(model)
+            swa_scheduler.step()
+            dt_swa = time.time() - t0_swa
+            if verbose and (swa_ep % 10 == 0 or swa_ep == swa_epochs - 1):
+                print(f"  SWA {swa_ep:3d}/{swa_epochs}: loss={train_loss_swa:.4f} lr={optimizer.param_groups[0]['lr']:.2e} ({dt_swa:.1f}s)")
+        # Update BN stats with SWA model
+        try:
+            update_bn(train_loader, swa_model, device=device)
+        except Exception:
+            pass  # No BN layers in GAT
+        # Evaluate SWA model
+        swa_metrics = evaluate(swa_model, val_loader, device, tol_samples=tol)
+        swa_f1 = swa_metrics['boundary_f1_600ms']
+        if verbose:
+            print(f"  SWA val_f1={swa_f1:.4f} (pre-SWA best={best_metrics.get('val_f1', 0):.4f})")
+        # Use SWA model if it's better or close (SWA models improve more with post-processing)
+        if swa_f1 >= best_metrics.get('val_f1', 0) - 0.02:
+            # Extract inner model weights from AveragedModel wrapper
+            model.load_state_dict({k.replace('module.', ''): v for k, v in swa_model.state_dict().items() if k.startswith('module.')})
+            best_model_state = {k: v.cpu().clone() for k, v in model.state_dict().items()}
+            if verbose:
+                print(f"  Using SWA model (swa_f1={swa_f1:.4f})")
+        else:
+            # Restore pre-SWA best
+            model.load_state_dict(best_model_state)
+            model.to(device)
+            if verbose:
+                print(f"  SWA model worse, keeping pre-SWA best")
+
     # Save checkpoint BEFORE post-processing (GPU may crash during threshold opt)
     checkpoint_dir = os.path.join(os.path.dirname(train_dir), 'checkpoints')
     os.makedirs(checkpoint_dir, exist_ok=True)
