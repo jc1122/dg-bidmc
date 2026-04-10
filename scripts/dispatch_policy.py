@@ -21,25 +21,51 @@ class DispatchPolicy:
     cpu_eval_max_concurrent: int = 4
 
 
+# Caps applied during screen_cpu stage to reduce cost
+_SCREEN_MAX_EPOCHS = 25
+_SCREEN_MAX_PATIENCE = 5
+
+
 def classify_stage(config: dict) -> str:
     """Return the dispatch stage for *config*, defaulting to 'train_gpu'."""
     return config.get("dispatch_stage", "train_gpu")
 
 
-def default_screen_config(config: dict) -> dict:
-    """Return a lightweight screening copy of *config*.
+def prepare_stage_config(config: dict, stage: str | None = None) -> dict:
+    """Return a config shaped for *stage*, without mutating the original.
 
-    Caps epochs/patience, forces single ensemble and coarse postprocess
-    while preserving model architecture keys.
+    This is the **canonical** shaping function used by all dispatch paths
+    (dry-run, live, standalone runner).
+
+    Stages:
+        screen_cpu  -- cap epochs/patience, force n_ensemble=1, coarse
+                       postprocess, mark ``_screening``
+        train_gpu   -- full training, no caps
+        eval_cpu    -- CPU-lane evaluation, mark ``_eval_only``
+
+    If *stage* is ``None``, it is read from ``config["dispatch_stage"]``
+    (defaulting to ``"train_gpu"``).
     """
     out = copy.deepcopy(config)
-    out["dispatch_stage"] = "screen_cpu"
-    if "max_epochs" in out:
-        out["max_epochs"] = min(out["max_epochs"], 25)
-    if "patience" in out:
-        out["patience"] = min(out["patience"], 5)
-    out["n_ensemble"] = 1
-    out["postprocess_search"] = "coarse"
+    if stage is None:
+        stage = out.get("dispatch_stage", "train_gpu")
+
+    out["dispatch_stage"] = stage
+
+    if stage == "screen_cpu":
+        out["max_epochs"] = min(
+            out.get("max_epochs", _SCREEN_MAX_EPOCHS), _SCREEN_MAX_EPOCHS,
+        )
+        out["patience"] = min(
+            out.get("patience", _SCREEN_MAX_PATIENCE), _SCREEN_MAX_PATIENCE,
+        )
+        out["n_ensemble"] = 1
+        out["postprocess_search"] = "coarse"
+        out["_screening"] = True
+    elif stage == "eval_cpu":
+        out["_eval_only"] = True
+    # train_gpu: no caps — preserve full training behaviour
+
     return out
 
 

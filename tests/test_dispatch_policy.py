@@ -1,10 +1,12 @@
 """Tests for scripts.dispatch_policy — staged dispatch helpers."""
 
+import copy
+
 import pytest
 from scripts.dispatch_policy import (
     DispatchPolicy,
     classify_stage,
-    default_screen_config,
+    prepare_stage_config,
     promotion_candidates,
     resources_for_stage,
 )
@@ -26,45 +28,111 @@ class TestClassifyStage:
 
 
 # ---------------------------------------------------------------------------
-# default_screen_config
+# prepare_stage_config (canonical shaping function)
 # ---------------------------------------------------------------------------
 
-class TestDefaultScreenConfig:
-    def test_sets_dispatch_stage(self):
-        out = default_screen_config({"lr": 0.01})
-        assert out["dispatch_stage"] == "screen_cpu"
+class TestPrepareStageConfig:
+    """Covers all stages, caps, defaults, flags, and no-mutation guarantees."""
 
-    def test_caps_max_epochs(self):
-        assert default_screen_config({"max_epochs": 100})["max_epochs"] == 25
+    # -- screen_cpu --------------------------------------------------------
 
-    def test_keeps_low_max_epochs(self):
-        assert default_screen_config({"max_epochs": 10})["max_epochs"] == 10
+    def test_screen_cpu_caps_max_epochs(self):
+        cfg = prepare_stage_config({"max_epochs": 100}, "screen_cpu")
+        assert cfg["max_epochs"] == 25
 
-    def test_caps_patience(self):
-        assert default_screen_config({"patience": 20})["patience"] == 5
+    def test_screen_cpu_keeps_low_epochs(self):
+        cfg = prepare_stage_config({"max_epochs": 10}, "screen_cpu")
+        assert cfg["max_epochs"] == 10
 
-    def test_keeps_low_patience(self):
-        assert default_screen_config({"patience": 3})["patience"] == 3
+    def test_screen_cpu_defaults_missing_max_epochs(self):
+        cfg = prepare_stage_config({}, "screen_cpu")
+        assert cfg["max_epochs"] == 25
 
-    def test_sets_n_ensemble(self):
-        assert default_screen_config({"n_ensemble": 5})["n_ensemble"] == 1
+    def test_screen_cpu_caps_patience(self):
+        cfg = prepare_stage_config({"patience": 20}, "screen_cpu")
+        assert cfg["patience"] == 5
 
-    def test_sets_postprocess_search(self):
-        out = default_screen_config({"postprocess_search": "fine"})
-        assert out["postprocess_search"] == "coarse"
+    def test_screen_cpu_keeps_low_patience(self):
+        cfg = prepare_stage_config({"patience": 3}, "screen_cpu")
+        assert cfg["patience"] == 3
 
-    def test_preserves_model_keys(self):
+    def test_screen_cpu_defaults_missing_patience(self):
+        cfg = prepare_stage_config({}, "screen_cpu")
+        assert cfg["patience"] == 5
+
+    def test_screen_cpu_forces_ensemble_1(self):
+        cfg = prepare_stage_config({"n_ensemble": 5}, "screen_cpu")
+        assert cfg["n_ensemble"] == 1
+
+    def test_screen_cpu_sets_coarse_postprocess(self):
+        cfg = prepare_stage_config({"postprocess_search": "fine"}, "screen_cpu")
+        assert cfg["postprocess_search"] == "coarse"
+
+    def test_screen_cpu_marks_screening(self):
+        cfg = prepare_stage_config({}, "screen_cpu")
+        assert cfg["_screening"] is True
+        assert cfg["dispatch_stage"] == "screen_cpu"
+
+    def test_screen_cpu_preserves_model_keys(self):
         cfg = {"arch": "GAT", "hidden": 64, "heads": 8}
-        out = default_screen_config(cfg)
+        out = prepare_stage_config(cfg, "screen_cpu")
         assert out["arch"] == "GAT"
         assert out["hidden"] == 64
         assert out["heads"] == 8
 
+    # -- train_gpu ---------------------------------------------------------
+
+    def test_train_gpu_preserves_full_config(self):
+        base = {"max_epochs": 200, "patience": 30, "n_ensemble": 5}
+        cfg = prepare_stage_config(base, "train_gpu")
+        assert cfg["max_epochs"] == 200
+        assert cfg["patience"] == 30
+        assert cfg["n_ensemble"] == 5
+        assert cfg["dispatch_stage"] == "train_gpu"
+
+    def test_train_gpu_no_screening_flag(self):
+        cfg = prepare_stage_config({}, "train_gpu")
+        assert "_screening" not in cfg
+
+    # -- eval_cpu ----------------------------------------------------------
+
+    def test_eval_cpu_marks_eval_only(self):
+        cfg = prepare_stage_config({}, "eval_cpu")
+        assert cfg["_eval_only"] is True
+        assert cfg["dispatch_stage"] == "eval_cpu"
+
+    # -- stage inference ---------------------------------------------------
+
+    def test_stage_from_config_when_none(self):
+        cfg = prepare_stage_config({"dispatch_stage": "eval_cpu"})
+        assert cfg["_eval_only"] is True
+
+    def test_default_stage_is_train_gpu(self):
+        cfg = prepare_stage_config({"lr": 0.01})
+        assert cfg["dispatch_stage"] == "train_gpu"
+
+    # -- no-mutation guarantees --------------------------------------------
+
     def test_does_not_mutate_original(self):
-        cfg = {"max_epochs": 100, "patience": 20}
-        default_screen_config(cfg)
-        assert cfg["max_epochs"] == 100
-        assert cfg["patience"] == 20
+        orig = {"max_epochs": 100, "patience": 20, "nested": {"a": 1}}
+        snapshot = copy.deepcopy(orig)
+        prepare_stage_config(orig, "screen_cpu")
+        assert orig == snapshot
+
+    def test_deep_copy_isolates_nested(self):
+        inner = {"a": 1}
+        orig = {"nested": inner}
+        out = prepare_stage_config(orig, "screen_cpu")
+        out["nested"]["a"] = 999
+        assert inner["a"] == 1
+
+    # -- idempotency -------------------------------------------------------
+
+    def test_double_application_is_idempotent(self):
+        cfg = {"max_epochs": 200, "patience": 30}
+        once = prepare_stage_config(cfg, "screen_cpu")
+        twice = prepare_stage_config(once, "screen_cpu")
+        assert once == twice
 
 
 # ---------------------------------------------------------------------------

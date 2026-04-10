@@ -73,11 +73,13 @@ def _resolve_stage(config: dict, cpu_only: bool = False) -> str:
 def _build_dry_run_manifest(config: dict, stage: str, output_path: Path) -> dict:
     """Build and persist a dry-run manifest without contacting Ray."""
     try:
-        from scripts.dispatch_policy import DispatchPolicy, resources_for_stage
-        from scripts.ray_runner import prepare_stage_config
+        from scripts.dispatch_policy import (
+            DispatchPolicy, resources_for_stage, prepare_stage_config,
+        )
     except ImportError:
-        from dispatch_policy import DispatchPolicy, resources_for_stage
-        from ray_runner import prepare_stage_config
+        from dispatch_policy import (
+            DispatchPolicy, resources_for_stage, prepare_stage_config,
+        )
 
     policy = DispatchPolicy()
     resources = resources_for_stage(stage, policy)
@@ -99,7 +101,11 @@ def _build_dry_run_manifest(config: dict, stage: str, output_path: Path) -> dict
 
 
 def _run_trial_remote(config_json: str) -> str:
-    """Run a trial inside a Ray worker (CPU or GPU -- resource-agnostic)."""
+    """Run a trial inside a Ray worker (CPU or GPU -- resource-agnostic).
+
+    Expects *config_json* to be **already shaped** by
+    ``dispatch_policy.prepare_stage_config`` — no re-shaping is done here.
+    """
     import json as _json
     import os as _os
     import sys as _sys
@@ -109,14 +115,11 @@ def _run_trial_remote(config_json: str) -> str:
     _sys.path.insert(0, _os.path.join(cwd, "scripts"))
     _os.environ["DG_PROJECT_ROOT"] = cwd
     try:
-        from ray_runner import run_trial, get_default_config, prepare_stage_config
+        from ray_runner import run_trial, get_default_config
 
         config = _json.loads(config_json)
-        stage = config.get("dispatch_stage", "train_gpu")
-        shaped = prepare_stage_config(config, stage)
-
         full = get_default_config()
-        full.update(shaped)
+        full.update(config)
         return _json.dumps(run_trial(full))
     except Exception as e:
         return _json.dumps({
@@ -138,9 +141,13 @@ def dispatch(config: dict, project_root: Path, output_path: Path,
 
     import ray
     try:
-        from scripts.dispatch_policy import DispatchPolicy, resources_for_stage
+        from scripts.dispatch_policy import (
+            DispatchPolicy, resources_for_stage, prepare_stage_config,
+        )
     except ImportError:
-        from dispatch_policy import DispatchPolicy, resources_for_stage
+        from dispatch_policy import (
+            DispatchPolicy, resources_for_stage, prepare_stage_config,
+        )
 
     policy = DispatchPolicy()
     resources = resources_for_stage(stage, policy)
@@ -152,14 +159,8 @@ def dispatch(config: dict, project_root: Path, output_path: Path,
     finally:
         restore_gitignore(project_root)
 
-    # Stamp stage into config so the worker receives it
-    config["dispatch_stage"] = stage
-
-    try:
-        from scripts.ray_runner import prepare_stage_config as _psc
-    except ImportError:
-        from ray_runner import prepare_stage_config as _psc
-    shaped = _psc(config, stage)
+    # Shape once — deepcopy, so the caller's dict is never mutated
+    shaped = prepare_stage_config(config, stage)
     config_json = json.dumps(shaped)
 
     print(f"Dispatching trial (stage={stage}, resources={resources}, "

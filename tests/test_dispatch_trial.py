@@ -1,10 +1,11 @@
-"""Tests for stage-aware dispatch_trial and ray_runner stage shaping (Task 3).
+"""Tests for stage-aware dispatch_trial (Task 3).
 
 All tests are offline — no live Ray cluster required.
 """
 
 from __future__ import annotations
 
+import copy
 import json
 import subprocess
 import sys
@@ -15,80 +16,100 @@ import pytest
 # Ensure scripts/ is importable
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "scripts"))
 
-from ray_runner import prepare_stage_config  # noqa: E402
+from dispatch_policy import prepare_stage_config  # noqa: E402
 
 _PROJECT_ROOT = str(Path(__file__).resolve().parent.parent)
 
 
 # ---------------------------------------------------------------------------
-# prepare_stage_config
+# No-mutation guarantee for the dispatch live path
 # ---------------------------------------------------------------------------
 
 
-class TestPrepareStageConfig:
-    """Unit tests for ray_runner.prepare_stage_config."""
+class TestDispatchNoMutation:
+    """Verify the config-prep pattern used by dispatch() never mutates input."""
 
-    def test_screen_cpu_caps_max_epochs(self):
-        cfg = prepare_stage_config({"max_epochs": 100}, "screen_cpu")
-        assert cfg["max_epochs"] == 25
+    def test_resolve_stage_does_not_mutate(self):
+        from dispatch_trial import _resolve_stage
+        cfg = {"dispatch_stage": "train_gpu", "lr": 0.01}
+        snapshot = copy.deepcopy(cfg)
+        _resolve_stage(cfg, cpu_only=False)
+        assert cfg == snapshot
 
-    def test_screen_cpu_keeps_low_epochs(self):
-        cfg = prepare_stage_config({"max_epochs": 10}, "screen_cpu")
-        assert cfg["max_epochs"] == 10
+    def test_resolve_stage_cpu_only_does_not_mutate(self):
+        from dispatch_trial import _resolve_stage
+        cfg = {"dispatch_stage": "train_gpu", "lr": 0.01}
+        snapshot = copy.deepcopy(cfg)
+        _resolve_stage(cfg, cpu_only=True)
+        assert cfg == snapshot
 
-    def test_screen_cpu_caps_patience(self):
-        cfg = prepare_stage_config({"patience": 20}, "screen_cpu")
-        assert cfg["patience"] == 5
+    def test_full_prep_path_does_not_mutate(self):
+        """Simulate the exact code path dispatch() uses before serializing."""
+        from dispatch_trial import _resolve_stage
 
-    def test_screen_cpu_keeps_low_patience(self):
-        cfg = prepare_stage_config({"patience": 3}, "screen_cpu")
-        assert cfg["patience"] == 3
+        config = {
+            "dispatch_stage": "screen_cpu",
+            "max_epochs": 200,
+            "patience": 30,
+            "nested": {"a": 1},
+        }
+        snapshot = copy.deepcopy(config)
 
-    def test_screen_cpu_forces_ensemble_1(self):
-        cfg = prepare_stage_config({"n_ensemble": 5}, "screen_cpu")
-        assert cfg["n_ensemble"] == 1
+        stage = _resolve_stage(config, cpu_only=False)
+        shaped = prepare_stage_config(config, stage)
 
-    def test_screen_cpu_marks_screening(self):
-        cfg = prepare_stage_config({}, "screen_cpu")
-        assert cfg["_screening"] is True
-        assert cfg["dispatch_stage"] == "screen_cpu"
+        assert config == snapshot, "dispatch config-prep mutated the caller dict"
+        assert shaped is not config
+        assert shaped["max_epochs"] == 25
+        assert shaped["_screening"] is True
 
-    def test_train_gpu_preserves_full_config(self):
-        base = {"max_epochs": 200, "patience": 30, "n_ensemble": 5}
-        cfg = prepare_stage_config(base, "train_gpu")
-        assert cfg["max_epochs"] == 200
-        assert cfg["patience"] == 30
-        assert cfg["n_ensemble"] == 5
-        assert cfg["dispatch_stage"] == "train_gpu"
+    def test_dry_run_does_not_mutate_caller_config(self, tmp_path):
+        """End-to-end: dry-run must leave the caller's config untouched."""
+        from dispatch_trial import dispatch
 
-    def test_train_gpu_no_screening_flag(self):
-        cfg = prepare_stage_config({}, "train_gpu")
-        assert "_screening" not in cfg
+        config = {"dispatch_stage": "screen_cpu", "max_epochs": 200}
+        snapshot = copy.deepcopy(config)
 
-    def test_eval_cpu_marks_eval_only(self):
-        cfg = prepare_stage_config({}, "eval_cpu")
-        assert cfg["_eval_only"] is True
-        assert cfg["dispatch_stage"] == "eval_cpu"
+        out = tmp_path / "manifest.json"
+        dispatch(config, Path(_PROJECT_ROOT), out, dry_run=True)
 
-    def test_does_not_mutate_original(self):
-        orig = {"max_epochs": 100, "patience": 20, "nested": {"a": 1}}
-        prepare_stage_config(orig, "screen_cpu")
-        assert orig["max_epochs"] == 100
-        assert orig["patience"] == 20
+        assert config == snapshot, "dry-run mutated the caller config"
 
-    def test_stage_from_config_when_none(self):
-        cfg = prepare_stage_config({"dispatch_stage": "eval_cpu"})
-        assert cfg["_eval_only"] is True
 
-    def test_default_stage_is_train_gpu(self):
-        cfg = prepare_stage_config({"lr": 0.01})
-        assert cfg["dispatch_stage"] == "train_gpu"
+# ---------------------------------------------------------------------------
+# Canonical shaping consistency
+# ---------------------------------------------------------------------------
 
-    def test_screen_cpu_defaults_missing_keys(self):
-        """When max_epochs/patience absent, uses caps as defaults."""
-        cfg = prepare_stage_config({}, "screen_cpu")
-        assert cfg["max_epochs"] == 25
-        assert cfg["patience"] == 5
+
+class TestCanonicalShaping:
+    """Verify dry-run and live paths use the same canonical shaping."""
+
+    def test_dry_run_manifest_uses_canonical_shaping(self, tmp_path):
+        """The shaped config in a dry-run manifest must match
+        prepare_stage_config applied directly."""
+        from dispatch_trial import dispatch
+
+        config = {
+            "dispatch_stage": "screen_cpu",
+            "max_epochs": 200,
+            "patience": 30,
+        }
+        out = tmp_path / "manifest.json"
+        manifest = dispatch(config, Path(_PROJECT_ROOT), out, dry_run=True)
+
+        expected = prepare_stage_config(config, "screen_cpu")
+        assert manifest["config"] == expected
+
+    def test_screen_stage_includes_postprocess_coarse(self, tmp_path):
+        """Screen-stage shaping must set postprocess_search=coarse."""
+        from dispatch_trial import dispatch
+
+        config = {"dispatch_stage": "screen_cpu"}
+        out = tmp_path / "manifest.json"
+        manifest = dispatch(config, Path(_PROJECT_ROOT), out, dry_run=True)
+
+        assert manifest["config"]["postprocess_search"] == "coarse"
+        assert manifest["config"]["_screening"] is True
 
 
 # ---------------------------------------------------------------------------
@@ -181,8 +202,6 @@ class TestDryRunCLI:
         """Dry-run must not attempt to import or connect to Ray."""
         out_dir = tmp_path / "noray"
         out_dir.mkdir()
-        # If Ray were imported, it would likely fail (no cluster).
-        # The test passing proves Ray is not contacted.
         manifest, _ = self._run_dry_run(
             {"dispatch_stage": "eval_cpu"}, out_dir=out_dir,
         )

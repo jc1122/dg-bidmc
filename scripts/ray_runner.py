@@ -28,43 +28,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 PROJECT_ROOT = Path(os.environ.get('DG_PROJECT_ROOT', os.getcwd()))
 
 
-# ---------------------------------------------------------------------------
-# Stage-aware config shaping
-# ---------------------------------------------------------------------------
-
-# Caps applied during screen_cpu stage to reduce cost
-_SCREEN_MAX_EPOCHS = 25
-_SCREEN_MAX_PATIENCE = 5
-
-
-def prepare_stage_config(config: dict, stage: str | None = None) -> dict:
-    """Return a config shaped for *stage*, without mutating the original.
-
-    Stages:
-        screen_cpu  -- cap epochs/patience, force n_ensemble=1, mark screening
-        train_gpu   -- full training, no caps
-        eval_cpu    -- CPU-lane evaluation, auditable
-
-    If *stage* is ``None``, it is read from ``config["dispatch_stage"]``
-    (defaulting to ``"train_gpu"``).
-    """
-    out = copy.deepcopy(config)
-    if stage is None:
-        stage = out.get("dispatch_stage", "train_gpu")
-
-    out["dispatch_stage"] = stage
-
-    if stage == "screen_cpu":
-        out["max_epochs"] = min(out.get("max_epochs", _SCREEN_MAX_EPOCHS), _SCREEN_MAX_EPOCHS)
-        out["patience"] = min(out.get("patience", _SCREEN_MAX_PATIENCE), _SCREEN_MAX_PATIENCE)
-        out["n_ensemble"] = 1
-        out["_screening"] = True
-    elif stage == "eval_cpu":
-        out["_eval_only"] = True
-    # train_gpu: no caps -- preserve full training behaviour
-
-    return out
-
 def get_default_config():
     """Default config for a basic GAT experiment."""
     return {
@@ -240,7 +203,8 @@ def main():
         Path(result_path).write_text(json.dumps(result, indent=2))
         sys.exit(1)
 
-    # Apply stage-aware config shaping
+    # Apply stage-aware config shaping (canonical function in dispatch_policy)
+    from dispatch_policy import prepare_stage_config
     stage = config.get('dispatch_stage', 'train_gpu')
     config = prepare_stage_config(config, stage)
 
