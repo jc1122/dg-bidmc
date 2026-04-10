@@ -112,10 +112,10 @@ dispatch_policy:
 
   # ── Staged dispatch concurrency knobs ──
   # CPU screening: cheap/fast trials on generic CPU workers
-  cpu_screen_max_concurrent: 4
-  cpu_screen_cpus_per_trial: 2
+  cpu_screen_max_concurrent: 6
+  cpu_screen_cpus_per_trial: 4
   # GPU promotion: full training on any GPU worker
-  gpu_promotion_max_concurrent: 2
+  gpu_promotion_max_concurrent: 1
   gpu_promotion_gpus_per_trial: 1
   # CPU evaluation: final eval on generic CPU workers
   cpu_eval_max_concurrent: 4

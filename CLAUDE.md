@@ -21,7 +21,6 @@ ray-head @ 89.167.79.237 / 100.105.11.68 (Tailscale)
     │
     └── Tailscale ──────────→ Aorus @ 100.104.191.44
                                16 CPU, 1 GPU (AMD RX 5700 XT, ROCm)
-                               resource label: {"aorus": 1}
 ```
 
 ### Aorus GPU Worker — CRITICAL CONSTRAINTS
@@ -30,14 +29,18 @@ ray-head @ 89.167.79.237 / 100.105.11.68 (Tailscale)
 - `torch 2.9.1a0+gitd38164a` (system Python at `/usr/bin/python3`)
 - Ray venv: `~/ray-venv` (Ray only — NO torch in venv)
 
-To target Aorus from Ray tasks:
+For this repository's dispatch path, emit generic Ray resources only and let
+placement be delegated by Ray plus the ray-hetzner workflow:
 ```python
-@ray.remote(num_gpus=1, resources={"aorus": 1})  # GPU work on Aorus
+@ray.remote(num_gpus=1)  # GPU lane; placement delegated externally
 def train_model(): ...
 
-@ray.remote(resources={"aorus": 1})  # CPU-only work on Aorus
+@ray.remote(num_cpus=4)  # CPU screening/eval lane
 def cpu_task(): ...
 ```
+
+Infrastructure-specific smoke tests may still target Aorus directly, but that is
+not this repository's active dispatch contract.
 
 ### Re-attaching Aorus After Cluster Restart
 

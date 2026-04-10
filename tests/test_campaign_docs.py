@@ -33,6 +33,11 @@ def agents_text() -> str:
     return (ROOT / "AGENTS.md").read_text()
 
 
+@pytest.fixture(scope="module")
+def claude_text() -> str:
+    return (ROOT / "CLAUDE.md").read_text()
+
+
 # ---------------------------------------------------------------------------
 # Campaign YAML: staged dispatch knobs
 # ---------------------------------------------------------------------------
@@ -53,12 +58,28 @@ class TestCampaignDispatchKnobs:
             assert key in dp, f"Missing dispatch_policy.{key}"
             assert isinstance(dp[key], int) and dp[key] >= 1
 
+    def test_dispatch_policy_matches_code_defaults(self, campaign):
+        from scripts.dispatch_policy import DispatchPolicy
+
+        dp = campaign["dispatch_policy"]
+        defaults = DispatchPolicy()
+        assert dp["cpu_screen_max_concurrent"] == defaults.cpu_screen_max_concurrent
+        assert dp["cpu_screen_cpus_per_trial"] == defaults.cpu_screen_cpus_per_trial
+        assert dp["gpu_promotion_max_concurrent"] == defaults.gpu_promotion_max_concurrent
+        assert dp["gpu_promotion_gpus_per_trial"] == defaults.gpu_promotion_gpus_per_trial
+        assert dp["cpu_eval_max_concurrent"] == defaults.cpu_eval_max_concurrent
+
     def test_promotion_gate_present(self, campaign):
         dp = campaign["dispatch_policy"]
         assert "promotion_min_score" in dp
         assert "promotion_top_k" in dp
         assert 0.0 < dp["promotion_min_score"] < 1.0
         assert dp["promotion_top_k"] >= 1
+
+    def test_promotion_gate_matches_trial_budget(self, campaign):
+        dp = campaign["dispatch_policy"]
+        tb = campaign["execution"]["trial_budget"]
+        assert dp["promotion_top_k"] == tb["gpu_promotions_per_iteration"]
 
     def test_trial_budget_is_staged(self, campaign):
         tb = campaign["execution"]["trial_budget"]
@@ -89,11 +110,14 @@ _DISPATCH_SURFACE_GLOBS = [
 class TestNoNamedResources:
     @pytest.fixture(scope="class")
     def dispatch_surface_text(self) -> str:
-        parts = []
+        found = []
         for pattern in _DISPATCH_SURFACE_GLOBS:
-            for p in ROOT.glob(pattern):
-                parts.append(p.read_text())
-        return "\n".join(parts)
+            found.extend(ROOT.glob(pattern))
+        assert len(found) == len(_DISPATCH_SURFACE_GLOBS), (
+            f"Missing dispatch surface files: expected {len(_DISPATCH_SURFACE_GLOBS)}, "
+            f"found {len(found)}"
+        )
+        return "\n".join(path.read_text() for path in found)
 
     def test_dispatch_surfaces_no_aorus_resource(self, dispatch_surface_text):
         # Check for the resource dict pattern, not just the host name
@@ -117,6 +141,10 @@ class TestNoNamedResources:
                 assert "no " in lower or "never" in lower or "e.g." in lower, (
                     f"AGENTS.md uses named-resource dispatch as active pattern:\n  {line}"
                 )
+
+    def test_claude_no_named_resource_dispatch(self, claude_text):
+        assert 'resources={"aorus"' not in claude_text
+        assert "resources={\"aorus\"" not in claude_text
 
 
 # ---------------------------------------------------------------------------

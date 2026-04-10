@@ -12,7 +12,10 @@ import copy
 import json
 import sys
 
-from scripts.dispatch_policy import DispatchPolicy, classify_stage, resources_for_stage
+try:
+    from scripts.dispatch_policy import DispatchPolicy, classify_stage, resources_for_stage
+except ImportError:
+    from dispatch_policy import DispatchPolicy, classify_stage, resources_for_stage
 
 
 def build_batch_manifest(

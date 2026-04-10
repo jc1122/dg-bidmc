@@ -14,9 +14,9 @@ from dataclasses import dataclass
 class DispatchPolicy:
     """Resource budget knobs for staged dispatch."""
 
-    cpu_screen_max_concurrent: int = 4
-    cpu_screen_cpus_per_trial: int = 2
-    gpu_promotion_max_concurrent: int = 2
+    cpu_screen_max_concurrent: int = 6
+    cpu_screen_cpus_per_trial: int = 4
+    gpu_promotion_max_concurrent: int = 1
     gpu_promotion_gpus_per_trial: int = 1
     cpu_eval_max_concurrent: int = 4
 

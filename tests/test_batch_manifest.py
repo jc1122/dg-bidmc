@@ -138,3 +138,32 @@ def test_cli_prints_json(tmp_path: object, policy: DispatchPolicy) -> None:
     manifest = json.loads(result.stdout)
     assert manifest["batch_id"] == "cli-test-iter5-batch1"
     assert len(manifest["trials"]) == 2
+
+
+def test_cli_prints_json_when_run_as_script_path(tmp_path: object) -> None:
+    configs = [
+        {"trial_id": "c1", "dispatch_stage": "screen_cpu"},
+        {"trial_id": "c2", "dispatch_stage": "train_gpu"},
+    ]
+    cfg_path = str(tmp_path / "cli_configs.json")  # type: ignore[operator]
+    with open(cfg_path, "w") as f:
+        json.dump(configs, f)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/build_batch_manifest.py",
+            "--campaign-id",
+            "cli-test",
+            "--iteration",
+            "5",
+            cfg_path,
+        ],
+        capture_output=True,
+        text=True,
+        cwd=_PROJECT_ROOT,
+    )
+    assert result.returncode == 0, result.stderr
+    manifest = json.loads(result.stdout)
+    assert manifest["batch_id"] == "cli-test-iter5-batch1"
+    assert len(manifest["trials"]) == 2
