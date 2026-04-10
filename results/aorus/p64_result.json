@@ -1,0 +1,178 @@
+{
+  "experiment": "P64_trough_snapping",
+  "baseline_f1": 0.9123162765378335,
+  "simple_f1": 0.7817473200354497,
+  "best_f1": 0.9128152785338414,
+  "improvement": 0.0004990019960078307,
+  "best_mode": "filter+snap",
+  "best_params": {
+    "thresh": 0.01,
+    "nms": 230,
+    "top_n": 6,
+    "snap_radius": 50
+  },
+  "all_results": {
+    "filter_r25": {
+      "f1": 0.9122709127200145,
+      "params": {
+        "thresh": 0.01,
+        "nms": 230,
+        "top_n": 6,
+        "snap_radius": 25
+      }
+    },
+    "filter_r50": {
+      "f1": 0.9122709127200145,
+      "params": {
+        "thresh": 0.01,
+        "nms": 230,
+        "top_n": 6,
+        "snap_radius": 50
+      }
+    },
+    "filter_r75": {
+      "f1": 0.9122709127200145,
+      "params": {
+        "thresh": 0.01,
+        "nms": 230,
+        "top_n": 6,
+        "snap_radius": 75
+      }
+    },
+    "filter_r100": {
+      "f1": 0.9122709127200145,
+      "params": {
+        "thresh": 0.01,
+        "nms": 230,
+        "top_n": 6,
+        "snap_radius": 100
+      }
+    },
+    "filter_r125": {
+      "f1": 0.9122709127200145,
+      "params": {
+        "thresh": 0.01,
+        "nms": 230,
+        "top_n": 6,
+        "snap_radius": 125
+      }
+    },
+    "filter_r150": {
+      "f1": 0.9122709127200145,
+      "params": {
+        "thresh": 0.01,
+        "nms": 230,
+        "top_n": 6,
+        "snap_radius": 150
+      }
+    },
+    "snap_r25": {
+      "f1": 0.9123162765378335,
+      "params": {
+        "thresh": 0.01,
+        "nms": 230,
+        "top_n": 6,
+        "snap_radius": 25
+      }
+    },
+    "snap_r50": {
+      "f1": 0.9123162765378335,
+      "params": {
+        "thresh": 0.01,
+        "nms": 230,
+        "top_n": 6,
+        "snap_radius": 50
+      }
+    },
+    "snap_r75": {
+      "f1": 0.9123162765378335,
+      "params": {
+        "thresh": 0.01,
+        "nms": 230,
+        "top_n": 6,
+        "snap_radius": 75
+      }
+    },
+    "snap_r100": {
+      "f1": 0.9123162765378335,
+      "params": {
+        "thresh": 0.01,
+        "nms": 230,
+        "top_n": 6,
+        "snap_radius": 100
+      }
+    },
+    "snap_r125": {
+      "f1": 0.9123162765378335,
+      "params": {
+        "thresh": 0.01,
+        "nms": 230,
+        "top_n": 6,
+        "snap_radius": 125
+      }
+    },
+    "snap_r150": {
+      "f1": 0.9123162765378335,
+      "params": {
+        "thresh": 0.01,
+        "nms": 230,
+        "top_n": 6,
+        "snap_radius": 150
+      }
+    },
+    "filter+snap_r25": {
+      "f1": 0.9122709127200145,
+      "params": {
+        "thresh": 0.01,
+        "nms": 230,
+        "top_n": 6,
+        "snap_radius": 25
+      }
+    },
+    "filter+snap_r50": {
+      "f1": 0.9128152785338414,
+      "params": {
+        "thresh": 0.01,
+        "nms": 230,
+        "top_n": 6,
+        "snap_radius": 50
+      }
+    },
+    "filter+snap_r75": {
+      "f1": 0.9123162765378335,
+      "params": {
+        "thresh": 0.01,
+        "nms": 230,
+        "top_n": 6,
+        "snap_radius": 75
+      }
+    },
+    "filter+snap_r100": {
+      "f1": 0.9123162765378335,
+      "params": {
+        "thresh": 0.01,
+        "nms": 230,
+        "top_n": 6,
+        "snap_radius": 100
+      }
+    },
+    "filter+snap_r125": {
+      "f1": 0.9123162765378335,
+      "params": {
+        "thresh": 0.01,
+        "nms": 230,
+        "top_n": 6,
+        "snap_radius": 125
+      }
+    },
+    "filter+snap_r150": {
+      "f1": 0.9123162765378335,
+      "params": {
+        "thresh": 0.01,
+        "nms": 230,
+        "top_n": 6,
+        "snap_radius": 150
+      }
+    }
+  }
+}

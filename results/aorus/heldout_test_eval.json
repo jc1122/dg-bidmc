@@ -1,0 +1,38 @@
+{
+  "checkpoint": "artifacts/models/best_model_baseline_s789.pt",
+  "checkpoint_sha256": "76907b9ea0170636dcb09a0645518ca26c77e8640f64ec2092a03d6babf110bc",
+  "source": "copied from aorus:/home/jakub/projects/dg_bidmc/data/graphs/checkpoints/best_model_baseline_s789.pt",
+  "architecture": {
+    "arch": "transformer",
+    "in_dim": 6,
+    "edge_dim": 2,
+    "hidden_dim": 64,
+    "n_heads": 8,
+    "n_layers": 5
+  },
+  "post_processing": {
+    "threshold": 0.05,
+    "nms_dist": 175,
+    "top_n": 6,
+    "tol_samples": 75,
+    "fs": 125
+  },
+  "metrics": {
+    "val": {
+      "boundary_f1_600ms": 0.9792111054680889,
+      "rate_mae_bpm": 0.1981399070791619,
+      "n_graphs": 358
+    },
+    "val_adversarial": {
+      "boundary_f1_600ms": 0.9792668621700882,
+      "rate_mae_bpm": 0.1825510257101684,
+      "n_graphs": 310
+    },
+    "test": {
+      "boundary_f1_600ms": 0.9109591056192998,
+      "rate_mae_bpm": 0.5149168217194804,
+      "n_graphs": 412
+    }
+  },
+  "interpretation": "Validation score reproduces exactly; held-out patient test drops materially, so the 0.9792 validation score should not be treated as the generalization estimate."
+}

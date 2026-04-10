@@ -1,0 +1,10 @@
+{
+  "global_pp_mean": 0.9746571863890299,
+  "optimal_pp_mean": 0.9888081192550466,
+  "oracle_topN_mean": 0.941806331471136,
+  "oracle_topN_nms_mean": 0.9664804469273743,
+  "adaptive_est_mean": 0.8595723314914903,
+  "n_perfect_global": 304,
+  "n_below_90_global": 51,
+  "total_graphs": 358
+}

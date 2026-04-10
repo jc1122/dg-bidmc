@@ -1,0 +1,39 @@
+{
+  "logit_ensemble_5seed": {
+    "thresh": 0.019999999999999997,
+    "nms": 175,
+    "top_n": 6,
+    "val_f1": 0.9782207550363976,
+    "adv_f1": 0.9779374389051807,
+    "agg_f1": 0.97809326277735
+  },
+  "wide128_s42": {
+    "val_f1": 0.977518198747249,
+    "val_adversarial_f1": 0,
+    "agg_f1": 0
+  },
+  "wide128_long_s789": {
+    "val_f1": 0.9778059928897918,
+    "val_adversarial_f1": 0,
+    "agg_f1": 0
+  },
+  "deep7L_s42": {
+    "val_f1": 0.977179617403081,
+    "val_adversarial_f1": 0,
+    "agg_f1": 0
+  },
+  "lowlr_s42": {
+    "val_f1": 0.9743439986456747,
+    "val_adversarial_f1": 0,
+    "agg_f1": 0
+  },
+  "biggest_s42": {
+    "val_f1": 0.9772877960028798,
+    "val_adversarial_f1": 0,
+    "agg_f1": 0
+  },
+  "baseline_best_single": {
+    "agg_f1": 0.9792,
+    "note": "seed 789, h64, 5L"
+  }
+}
