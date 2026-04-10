@@ -32,3 +32,6 @@ data/graphs/**/*.pt
 
 # metaopt campaign state (ephemeral, not versioned)
 .ml-metaopt/
+
+# local git worktrees
+.worktrees/
