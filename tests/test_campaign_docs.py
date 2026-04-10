@@ -93,6 +93,13 @@ class TestCampaignDispatchKnobs:
             "Trial budget still implies single undifferentiated trial"
         )
 
+    def test_remote_queue_uses_explicit_project_root(self, campaign):
+        rq = campaign["remote_queue"]
+        expected = "/home/jakub/projects/dg_bidmc/.ml-metaopt"
+        assert expected in rq["enqueue_command"]
+        assert expected in rq["status_command"]
+        assert expected in rq["results_command"]
+
 
 # ---------------------------------------------------------------------------
 # No named-resource assumptions in project dispatch surfaces
@@ -168,6 +175,10 @@ class TestDocsGenericResources:
             "README should mention delegated execution"
         )
 
+    def test_readme_mentions_explicit_queue_root(self, readme_text):
+        assert "/home/jakub/projects/dg_bidmc/.ml-metaopt" in readme_text
+        assert "one-shot reconcile" in readme_text
+
     def test_agents_mentions_generic_resources(self, agents_text):
         lower = agents_text.lower()
         assert "generic" in lower and "resource" in lower
@@ -175,6 +186,10 @@ class TestDocsGenericResources:
     def test_agents_mentions_dispatch_contract(self, agents_text):
         lower = agents_text.lower()
         assert "dispatch contract" in lower or "dispatch path" in lower
+
+    def test_agents_mentions_explicit_queue_root(self, agents_text):
+        assert "/home/jakub/projects/dg_bidmc/.ml-metaopt" in agents_text
+        assert "one-shot reconcile" in agents_text
 
     def test_agents_preserves_torch_caution(self, agents_text):
         assert "NEVER" in agents_text

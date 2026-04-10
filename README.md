@@ -218,6 +218,10 @@ ray.remote(num_gpus=1)(train_fn)       # train_gpu stage — scheduler places on
 ```
 
 Remote batch execution is delegated through the Hetzner queue workflow.
+Always pass the explicit per-project queue root
+`/home/jakub/projects/dg_bidmc/.ml-metaopt`. If that root is not already in the
+daemon's watched set, enqueue must be followed by a one-shot reconcile on the
+Aorus head; otherwise the batch will remain queued but idle.
 See `~/projects/ray-hetzner/CLAUDE.md` for cluster setup details.
 
 ---

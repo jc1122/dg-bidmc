@@ -418,6 +418,11 @@ project dispatch path. Host placement is delegated to the Ray scheduler and
 the `ray-hetzner` autoscaler configuration. This keeps the project portable:
 adding or replacing GPU nodes requires only cluster-side config changes.
 
+Queue delegation must always use the explicit per-project queue root
+`/home/jakub/projects/dg_bidmc/.ml-metaopt`. If that root is not in the
+long-running daemon's watched set, the enqueue step must be followed by a
+one-shot reconcile on the Aorus head node; otherwise the batch will sit idle.
+
 To run GNN training via the project dispatcher:
 ```python
 # Generic resource dispatch — scheduler places on any GPU node
