@@ -110,6 +110,20 @@ dispatch_policy:
   background_slots: 4
   auxiliary_slots: 2
 
+  # ── Staged dispatch concurrency knobs ──
+  # CPU screening: cheap/fast trials on generic CPU workers
+  cpu_screen_max_concurrent: 4
+  cpu_screen_cpus_per_trial: 2
+  # GPU promotion: full training on any GPU worker
+  gpu_promotion_max_concurrent: 2
+  gpu_promotion_gpus_per_trial: 1
+  # CPU evaluation: final eval on generic CPU workers
+  cpu_eval_max_concurrent: 4
+
+  # ── Promotion gate: screen → GPU ──
+  promotion_min_score: 0.40      # boundary_f1_600ms threshold to qualify
+  promotion_top_k: 3             # max trials promoted per iteration
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Sanity check
 # scripts/local_sanity.py --fast:
@@ -270,8 +284,17 @@ execution:
   entrypoint: python3 /srv/metaopt/project/scripts/ray_runner.py
   target_cluster_utilization: 0.90
   trial_budget:
-    kind: fixed_trials
-    value: 1               # 1 Ray job per campaign iteration; Optuna TPE in orchestrator
+    kind: staged
+    screen_trials_per_iteration: 6     # cheap CPU trials per iteration
+    gpu_promotions_per_iteration: 3    # max promoted to full GPU training
+    # Total work per iteration = screen_trials + promoted trials
   search_strategy:
     kind: optuna_tpe
     seed: 42
+  # ── Resource contract ──
+  # This project emits generic Ray resource requirements only:
+  #   screen_cpu  → {num_cpus: N}
+  #   train_gpu   → {num_gpus: N}
+  #   eval_cpu    → {num_cpus: 1}
+  # Host placement (which machine runs what) is delegated to the
+  # cluster scheduler / ray-hetzner autoscaler — never encoded here.

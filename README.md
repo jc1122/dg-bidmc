@@ -195,15 +195,29 @@ ray-head @ 89.167.79.237 (Hetzner cx53, 16 CPU, Ray 2.40.0)
     │
     └── Aorus @ 100.104.191.44 (AMD RX 5700 XT, ROCm, 16 CPU)
          torch 2.9.1a0+gitd38164a — NEVER pip-install/upgrade torch here
-         resource label: {"aorus": 1}
 ```
 
-For GNN training, target Aorus GPU:
+### Dispatch model: generic resources only
+
+This project uses **staged dispatch** with generic Ray resource requests:
+
+| Stage | Resource request | Purpose |
+|-------|-----------------|---------|
+| `screen_cpu` | `num_cpus: N` | Cheap/fast CPU screening trials |
+| `train_gpu` | `num_gpus: N` | Full GPU training for promoted trials |
+| `eval_cpu` | `num_cpus: 1` | Final evaluation on CPU |
+
+The project **never** encodes host identity (e.g. named custom resources) in
+dispatch manifests. Host-to-resource mapping is handled externally by the
+Ray cluster scheduler and the `ray-hetzner` autoscaler configuration.
+
 ```python
-@ray.remote(num_gpus=1, resources={"aorus": 1})
-def train_dg_gat(...): ...
+# Project-side dispatch (scripts/dispatch_trial.py):
+ray.remote(num_cpus=2)(screen_fn)      # screen_cpu stage
+ray.remote(num_gpus=1)(train_fn)       # train_gpu stage — scheduler places on GPU node
 ```
 
+Remote batch execution is delegated through the Hetzner queue workflow.
 See `~/projects/ray-hetzner/CLAUDE.md` for cluster setup details.
 
 ---

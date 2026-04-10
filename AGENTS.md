@@ -397,21 +397,32 @@ ray-head @ 89.167.79.237 / 100.105.11.68 (Tailscale)
          torch 2.9.1a0+gitd38164a — NEVER pip-install/upgrade torch here
          System Python: /usr/bin/python3
          Ray venv: ~/ray-venv (Ray only, no torch)
-         resource label: {"aorus": 1}
 ```
 
 **NEVER** run `pip install torch` or `pip install --upgrade torch` on Aorus.
 The ROCm torch build is custom; reinstalling will break GPU access.
 
-To run GNN training on Aorus:
-```python
-import ray
-ray.init('ray://89.167.79.237:10001')
+### Dispatch contract: generic resources only
 
-@ray.remote(num_gpus=1, resources={"aorus": 1})
-def train_model(config):
-    # training code here
-    return results
+The project dispatch path (`scripts/dispatch_trial.py`,
+`scripts/build_batch_manifest.py`) uses **only generic Ray resources**:
+
+| Stage | Resource request | Purpose |
+|-------|-----------------|---------|
+| `screen_cpu` | `{num_cpus: N}` | Cheap CPU screening trials |
+| `train_gpu` | `{num_gpus: N}` | Full GPU training for promoted configs |
+| `eval_cpu` | `{num_cpus: 1}` | Final CPU evaluation |
+
+**No named custom resources** (e.g. `resources={"aorus": 1}`) appear in the
+project dispatch path. Host placement is delegated to the Ray scheduler and
+the `ray-hetzner` autoscaler configuration. This keeps the project portable:
+adding or replacing GPU nodes requires only cluster-side config changes.
+
+To run GNN training via the project dispatcher:
+```python
+# Generic resource dispatch — scheduler places on any GPU node
+from scripts.dispatch_trial import dispatch
+dispatch(config, project_root, output_path)
 ```
 
 To push code to head node:
