@@ -212,6 +212,7 @@ def train_one_epoch(model, loader, optimizer, config, device):
     label_sigma = config.get('label_sigma', 0)
     tol_samples = config.get('tol_samples_train', 75)
     edge_drop_rate = config.get('edge_drop_rate', 0.0)
+    label_smoothing = config.get('label_smoothing', 0.0)
     
     for batch in loader:
         try:
@@ -232,6 +233,10 @@ def train_one_epoch(model, loader, optimizer, config, device):
             targets = batch.y
             if label_sigma > 0 and hasattr(batch, 'node_bars'):
                 targets = _apply_soft_labels(batch, label_sigma, tol_samples)
+            
+            # Label smoothing: push hard labels away from 0/1
+            if label_smoothing > 0:
+                targets = targets * (1.0 - label_smoothing) + 0.5 * label_smoothing
             
             # Boundary loss (main)
             if use_focal:
@@ -280,6 +285,8 @@ def train_one_epoch(model, loader, optimizer, config, device):
                     cpu_targets = batch.y
                     if label_sigma > 0 and hasattr(batch, 'node_bars'):
                         cpu_targets = _apply_soft_labels(batch, label_sigma, tol_samples)
+                    if label_smoothing > 0:
+                        cpu_targets = cpu_targets * (1.0 - label_smoothing) + 0.5 * label_smoothing
                     if use_focal:
                         bce = focal_loss_with_logits(
                             out['boundary_logits'], cpu_targets,
@@ -359,14 +366,20 @@ def trough_snap_1d(pred_bars, all_bars, all_is_low, all_scores, all_amplitudes,
 
 @torch.no_grad()
 def evaluate(model, loader, device, threshold=0.5, tol_samples=75, fs=125,
-             nms_dist=0, top_n=0, snap_window=0, snap_mode='nearest_trough'):
+             nms_dist=0, top_n=0, snap_window=0, snap_mode='nearest_trough',
+             mc_samples=1):
     """Evaluate model on a data loader. Returns dict with metrics.
     
     Args:
         top_n: if >0, after NMS keep only top-N predictions by score per graph.
                This eliminates FP from over-prediction.
+        mc_samples: if >1, run MC-Dropout TTA — average logits over N stochastic
+                    forward passes with dropout active. Reduces prediction variance.
     """
-    model.eval()
+    if mc_samples <= 1:
+        model.eval()
+    else:
+        model.train()  # Keep dropout active for MC sampling
     all_f1s = []
     all_rate_maes = []
     total_loss = 0
@@ -374,9 +387,25 @@ def evaluate(model, loader, device, threshold=0.5, tol_samples=75, fs=125,
     
     for batch in loader:
         batch = batch.to(device)
-        out = model(batch.x, batch.edge_index,
-                     edge_attr=batch.edge_attr if hasattr(batch, 'edge_attr') else None,
-                     batch=batch.batch if hasattr(batch, 'batch') else None)
+        
+        # MC-Dropout: average logits over multiple stochastic forward passes
+        if mc_samples > 1:
+            logits_sum = None
+            for _ in range(mc_samples):
+                out = model(batch.x, batch.edge_index,
+                             edge_attr=batch.edge_attr if hasattr(batch, 'edge_attr') else None,
+                             batch=batch.batch if hasattr(batch, 'batch') else None)
+                if logits_sum is None:
+                    logits_sum = out['boundary_logits'].clone()
+                else:
+                    logits_sum += out['boundary_logits']
+            avg_logits = logits_sum / mc_samples
+            # Build a fake out dict with averaged logits
+            out = {'boundary_logits': avg_logits}
+        else:
+            out = model(batch.x, batch.edge_index,
+                         edge_attr=batch.edge_attr if hasattr(batch, 'edge_attr') else None,
+                         batch=batch.batch if hasattr(batch, 'batch') else None)
         
         # Loss
         bce = F.binary_cross_entropy_with_logits(out['boundary_logits'], batch.y)
