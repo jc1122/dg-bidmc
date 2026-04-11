@@ -192,6 +192,27 @@ def compute_rate_mae(pred_troughs, gt_troughs, fs=125):
     gt_rate = 60.0 / np.mean(gt_intervals) if np.mean(gt_intervals) > 0 else 0
     return abs(pred_rate - gt_rate)
 
+def soft_f1_loss(logits, targets, pos_weight=None):
+    """Differentiable approximation of 1 - F1 score.
+
+    Parameters
+    ----------
+    logits : Tensor [N]
+        Raw model outputs (before sigmoid).
+    targets : Tensor [N]
+        Binary labels (0 or 1, may be smoothed).
+    pos_weight : Tensor or None
+        If provided, scales TP contribution (helps with class imbalance).
+    """
+    probs = torch.sigmoid(logits)
+    w = pos_weight.item() if pos_weight is not None else 1.0
+    tp = (probs * targets).sum() * w
+    fp = (probs * (1 - targets)).sum()
+    fn = ((1 - probs) * targets).sum() * w
+    soft_f1 = (2 * tp) / (2 * tp + fp + fn + 1e-8)
+    return 1 - soft_f1
+
+
 def train_one_epoch(model, loader, optimizer, config, device):
     """Train for one epoch. Returns (mean_loss, device_used).
     
@@ -206,7 +227,10 @@ def train_one_epoch(model, loader, optimizer, config, device):
     pos_weight = torch.tensor(pw_val, device=device)
     rate_w = config.get('loss_rate_weight', 0.0)
     type_w = config.get('loss_type_weight', 0.0)
-    use_focal = config.get('boundary_loss', 'bce') == 'focal'
+    loss_fn = config.get('loss_fn', config.get('boundary_loss', 'bce'))
+    use_focal = loss_fn == 'focal'
+    use_soft_f1 = loss_fn in ('soft_f1', 'bce+soft_f1')
+    soft_f1_alpha = config.get('soft_f1_alpha', 0.5)
     focal_gamma = config.get('focal_gamma', 2.0)
     focal_alpha = config.get('focal_alpha', 0.25)
     label_sigma = config.get('label_sigma', 0)
@@ -247,7 +271,13 @@ def train_one_epoch(model, loader, optimizer, config, device):
                 bce = F.binary_cross_entropy_with_logits(
                     out['boundary_logits'], targets, pos_weight=pos_weight)
             
-            loss = bce
+            if loss_fn == 'soft_f1':
+                loss = soft_f1_loss(out['boundary_logits'], targets, pos_weight=pos_weight)
+            elif loss_fn == 'bce+soft_f1':
+                sf1 = soft_f1_loss(out['boundary_logits'], targets, pos_weight=pos_weight)
+                loss = (1 - soft_f1_alpha) * bce + soft_f1_alpha * sf1
+            else:
+                loss = bce
             
             # Rate aux loss
             if rate_w > 0 and 'rate_pred' in out and hasattr(batch, 'rate_target'):
