@@ -249,6 +249,11 @@ DEFAULT_FEATURE_CONFIG: dict[str, object] = {
     "feat_duration_ratio": False,
     "feat_phase_estimate": False,
 
+    # Multi-scale DG features (P99)
+    # When set, build auxiliary DG graphs at these LP cutoffs and project
+    # 4 features per scale onto primary-graph nodes.
+    "multi_scale_cutoffs": None,  # e.g. [0.5, 1.0, 4.0]
+
     # Edge features
     "edge_feat_log_size": True,
     "edge_feat_direction_match": True,
@@ -459,6 +464,12 @@ def compute_feature_dims(config: dict | None = None) -> tuple[int, int]:
     """Return ``(in_dim, edge_dim)`` for the given feature config."""
     in_dim = sum(d for key, d in _NODE_FEATURE_KEYS if _cfg(config, key))
     edge_dim = sum(d for key, d in _EDGE_FEATURE_KEYS if _cfg(config, key))
+
+    # Multi-scale DG features: 4 features per auxiliary scale
+    ms_cutoffs = _cfg(config, "multi_scale_cutoffs")
+    if ms_cutoffs:
+        in_dim += 4 * len(ms_cutoffs)
+
     return in_dim, edge_dim
 
 
@@ -472,6 +483,112 @@ def _safe_zscore(arr: np.ndarray) -> np.ndarray:
     if std < 1e-12:
         return np.zeros_like(arr)
     return (arr - arr.mean()) / std
+
+
+def _extract_multi_scale_features(
+    primary_node_bars: np.ndarray,
+    signal_raw: np.ndarray,
+    config: dict | None,
+    fs: int = 125,
+) -> np.ndarray:
+    """Build auxiliary DG graphs at multiple LP cutoffs and project features onto primary nodes.
+
+    For each auxiliary scale, produces 4 features per primary node:
+        1. log_edge_size_at_scale — max log(edge_size) of nearest auxiliary node (z-scored)
+        2. is_node_at_scale — 1.0 if an auxiliary node exists within tolerance, else 0.0
+        3. level_at_scale — KMeans level of nearest auxiliary node (normalized)
+        4. distance_to_nearest_at_scale — sample distance to nearest auxiliary node (normalized)
+
+    Returns [N_primary, 4 * n_scales] float32 array.
+    """
+    ms_cutoffs = _cfg(config, "multi_scale_cutoffs")
+    if not ms_cutoffs:
+        return np.zeros((len(primary_node_bars), 0), dtype=np.float32)
+
+    n_primary = len(primary_node_bars)
+    n_levels = int(_cfg(config, "n_levels"))
+    # Tolerance: half-breath at median rate (~15 bpm = 4s period, half = 2s = 250 samples)
+    tol = int(fs * 2.0)
+
+    all_scale_features: list[np.ndarray] = []
+
+    for cutoff in ms_cutoffs:
+        # Build auxiliary signal at this cutoff
+        sig = np.asarray(signal_raw, dtype=np.float64).copy()
+
+        # Apply same preprocessing as primary (detrend etc) but with different LP cutoff
+        if _cfg(config, "burst_suppress"):
+            from dg_pipeline_v2 import _suppress_bursts
+            sig = _suppress_bursts(sig)
+        if _cfg(config, "wavelet_denoise"):
+            from dg_pipeline_v2 import _denoise_wavelet
+            sig = _denoise_wavelet(sig)
+        detrend = _cfg(config, "detrend")
+        if detrend == "linear":
+            n = len(sig)
+            coeffs = np.polyfit(np.arange(n), sig, 1)
+            sig -= np.polyval(coeffs, np.arange(n))
+        elif detrend == "window_linear":
+            _window_detrend(sig, window_samples=fs * 30)
+
+        nyq = fs / 2.0
+        if cutoff < nyq:
+            b, a = butter(4, cutoff / nyq, "low")
+            sig = filtfilt(b, a, sig)
+        sig = np.ascontiguousarray(sig, dtype=np.float64)
+
+        # Build auxiliary graph
+        try:
+            aux_graph = build_graph(sig)
+            aux_node_level, _ = assign_levels(aux_graph, n_levels=n_levels)
+        except Exception:
+            # If graph building fails at this cutoff, fill with zeros
+            all_scale_features.append(np.zeros((n_primary, 4), dtype=np.float64))
+            continue
+
+        aux_bars = np.asarray(aux_graph.node_bar)
+        n_aux = len(aux_bars)
+
+        if n_aux == 0:
+            all_scale_features.append(np.zeros((n_primary, 4), dtype=np.float64))
+            continue
+
+        # Auxiliary per-node max log(edge_size)
+        aux_es = np.asarray(aux_graph.edge_size, dtype=np.float64)
+        aux_log_es = np.log(aux_es + 1e-8)
+        aux_log_es_node = np.full(n_aux, aux_log_es.min() if len(aux_log_es) > 0 else 0.0)
+        aux_src = np.asarray(aux_graph.edge_source_rows)
+        aux_dst = np.asarray(aux_graph.edge_to)
+        for i in range(len(aux_es)):
+            s, d = int(aux_src[i]), int(aux_dst[i])
+            if aux_log_es[i] > aux_log_es_node[s]:
+                aux_log_es_node[s] = aux_log_es[i]
+            if aux_log_es[i] > aux_log_es_node[d]:
+                aux_log_es_node[d] = aux_log_es[i]
+        aux_log_es_z = _safe_zscore(aux_log_es_node)
+
+        # Project: for each primary node, find nearest auxiliary node
+        feat_log_es = np.zeros(n_primary, dtype=np.float64)
+        feat_is_node = np.zeros(n_primary, dtype=np.float64)
+        feat_level = np.zeros(n_primary, dtype=np.float64)
+        feat_dist = np.zeros(n_primary, dtype=np.float64)
+
+        for i in range(n_primary):
+            dists = np.abs(aux_bars.astype(np.int64) - int(primary_node_bars[i]))
+            j = int(np.argmin(dists))
+            min_dist = int(dists[j])
+
+            if min_dist <= tol:
+                feat_log_es[i] = aux_log_es_z[j]
+                feat_is_node[i] = 1.0
+                feat_level[i] = aux_node_level[j] / max(n_levels - 1, 1)
+            feat_dist[i] = min_dist / max(tol, 1)  # normalized [0, 1+]
+
+        all_scale_features.append(
+            np.stack([feat_log_es, feat_is_node, feat_level, feat_dist], axis=1)
+        )
+
+    return np.concatenate(all_scale_features, axis=1).astype(np.float32)
 
 
 def _extract_node_features(
@@ -763,6 +880,14 @@ def extract_graph_data(
     # Node features
     x = _extract_node_features(graph, sig_lp, node_level, config,
                                n_levels=n_levels)
+
+    # Multi-scale DG features (P99)
+    ms_cutoffs = _cfg(config, "multi_scale_cutoffs")
+    if ms_cutoffs:
+        node_bars_arr = np.asarray(graph.node_bar)
+        ms_feats = _extract_multi_scale_features(
+            node_bars_arr, signal, config, fs=fs)
+        x = np.concatenate([x, ms_feats], axis=1)
 
     # Edge features
     edge_index, edge_attr = _extract_edge_features(graph, sig_lp, config)
