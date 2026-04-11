@@ -100,6 +100,19 @@ class TestCampaignDispatchKnobs:
         assert expected in rq["status_command"]
         assert expected in rq["results_command"]
 
+    def test_remote_queue_uses_local_ray_hetzner_checkout(self, campaign):
+        rq = campaign["remote_queue"]
+        helper_root = "/home/jakub/projects/ray-hetzner/metaopt"
+        assert helper_root in rq["enqueue_command"]
+        assert helper_root in rq["status_command"]
+        assert helper_root in rq["results_command"]
+
+    def test_execution_entrypoint_uses_aorus_ray_venv(self, campaign):
+        assert campaign["execution"]["entrypoint"] == "/home/jakub/ray-venv/bin/python3 scripts/ray_runner.py"
+
+    def test_results_contract_points_to_metrics_json(self, campaign):
+        assert campaign["results_contract"] == {"metrics_file": "metrics.json"}
+
 
 # ---------------------------------------------------------------------------
 # No named-resource assumptions in project dispatch surfaces

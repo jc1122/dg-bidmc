@@ -84,7 +84,26 @@ def test_batch_id_format(policy: DispatchPolicy) -> None:
 def test_entrypoint_default(policy: DispatchPolicy) -> None:
     configs = [{"trial_id": "t1", "dispatch_stage": "screen_cpu"}]
     manifest = build_batch_manifest("c", 0, configs, policy)
-    assert manifest["trials"][0]["entrypoint"] == "python3 /root/dg_bidmc/scripts/ray_runner.py"
+    assert manifest["execution"]["entrypoint"] == "/home/jakub/ray-venv/bin/python3 scripts/ray_runner.py"
+
+
+def test_manifest_uses_queue_backend_contract(policy: DispatchPolicy, tmp_path: Path) -> None:
+    cfg = {"trial_id": "x1", "dispatch_stage": "train_gpu", "lr": 0.01}
+    artifact_path = tmp_path / "code.tar.gz"
+    artifact_path.write_text("artifact")
+
+    manifest = build_batch_manifest(
+        "c",
+        0,
+        [cfg],
+        policy,
+        artifact_path=artifact_path,
+    )
+
+    assert manifest["version"] == 1
+    assert manifest["artifacts"]["code_artifact"]["uri"] == f"file://{artifact_path}"
+    assert manifest["results_contract"] == {"metrics_file": "metrics.json"}
+    assert json.loads(manifest["execution"]["env"]["METAOPT_EXPERIMENT_CONFIG_JSON"]) == cfg
 
 
 def test_entrypoint_custom(policy: DispatchPolicy) -> None:

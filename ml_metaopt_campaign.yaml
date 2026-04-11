@@ -162,33 +162,46 @@ remote_queue:
   # If this root is not part of the long-running daemon's watched set,
   # enqueue must be followed by a one-shot reconcile on the head node.
   enqueue_command: >-
-    python3 /opt/ray-hetzner/metaopt/enqueue_batch.py
+    python3 /home/jakub/projects/ray-hetzner/metaopt/enqueue_batch.py
     --queue-root /home/jakub/projects/dg_bidmc/.ml-metaopt
     --manifest
   status_command: >-
-    python3 /opt/ray-hetzner/metaopt/get_batch_status.py
+    python3 /home/jakub/projects/ray-hetzner/metaopt/get_batch_status.py
     --queue-root /home/jakub/projects/dg_bidmc/.ml-metaopt
     --batch-id
   results_command: >-
-    python3 /opt/ray-hetzner/metaopt/fetch_batch_results.py
+    python3 /home/jakub/projects/ray-hetzner/metaopt/fetch_batch_results.py
     --queue-root /home/jakub/projects/dg_bidmc/.ml-metaopt
     --batch-id
+
+results_contract:
+  metrics_file: metrics.json
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Execution
 #
 # runner: scripts/ray_runner.py
-#   - Reads METAOPT_TRIAL_CONFIG (JSON string in env) for hyperparameters
+#   Queue contract (ray-hetzner backend):
+#   - Invoked as: cd <workspace> && python3 scripts/ray_runner.py
+#   - Reads METAOPT_EXPERIMENT_CONFIG_JSON (JSON string in env) for hyperparameters
 #   - Trains one model configuration for max_epochs
 #   - Evaluates boundary F1 @600ms on val and val_adversarial splits
 #   - Also computes rate_mae_bpm (logged as secondary metric)
-#   - Writes JSON result to METAOPT_RESULT_PATH:
-#       {"boundary_f1_600ms": float, "rate_mae_bpm": float, "by_dataset": {...}}
+#   - Writes metrics.json to $METAOPT_WORKSPACE/results:
+#       {"best_result": {"aggregate_metric": float, "by_dataset": {...}}, ...}
 #   - CRITICAL: all GATConv/TransformerConv layers MUST use add_self_loops=False
 #     (gfx1010 torch.nonzero GPU kernel missing — see AGENTS.md pitfall 8)
 #
+#   Manifest generation: scripts/enqueue_trial_fanout.py
+#   - Creates one manifest per trial (one batch per trial)
+#   - Packages project code as a tar.gz artifact
+#   - Injects trial config via execution.env.METAOPT_EXPERIMENT_CONFIG_JSON
+#   - Sets results_contract.metrics_file = "metrics.json"
+#   - Entrypoint is relative to unpacked workspace: python3 scripts/ray_runner.py
+#   - Generic resource requests only (num_cpus / num_gpus); no named host resources
+#
 # ──────────────────────────────────────────────────────────────────────────────
-# SEARCH SPACE (all fields passed in METAOPT_TRIAL_CONFIG JSON)
+# SEARCH SPACE (all fields passed in METAOPT_EXPERIMENT_CONFIG_JSON)
 #
 # ── Graph construction (highs/lows series to degreegraph.compute_arrays) ──
 #   graph_variant:
@@ -284,7 +297,7 @@ remote_queue:
 # ──────────────────────────────────────────────────────────────────────────────
 execution:
   runner_type: ray_queue_runner
-  entrypoint: python3 /srv/metaopt/project/scripts/ray_runner.py
+  entrypoint: /home/jakub/ray-venv/bin/python3 scripts/ray_runner.py
   target_cluster_utilization: 0.90
   trial_budget:
     kind: staged

@@ -1,15 +1,37 @@
 #!/usr/bin/env python3
 """Ray remote training runner for DG-GNN metaoptimization.
 
-Reads experiment config from METAOPT_TRIAL_CONFIG env var (JSON string).
-Writes results to METAOPT_RESULT_PATH.
+Queue contract (new, primary):
+    The runner is invoked by the ray-hetzner queue backend as:
+        cd <workspace> && python3 scripts/ray_runner.py
 
-Usage (standalone):
-    METAOPT_TRIAL_CONFIG='{"arch":"gat","hidden_dim":64,...}' \
-    METAOPT_RESULT_PATH='result.json' \
+    Environment variables set by the queue backend:
+        METAOPT_WORKSPACE          path to the unpacked code artifact workspace
+        METAOPT_RUN_DIR            path to the run directory (logs, etc.)
+        METAOPT_BATCH_ID           current batch identifier
+        METAOPT_EXPERIMENT_CONFIG_JSON   JSON string with trial hyperparameters
+
+    Output: writes metrics.json to $METAOPT_WORKSPACE with shape:
+        {
+            "best_result": {
+                "aggregate_metric": <float>,   # weighted mean of by_dataset values
+                "by_dataset": {
+                    "bidmc_val": <float>,
+                    "bidmc_val_adversarial": <float>   # if adversarial data available
+                }
+            },
+            "utilization": {"wall_time_seconds": <float>, ...},
+            "full_result": {...}   # full trial result for analysis
+        }
+
+Legacy usage (standalone):
+    METAOPT_EXPERIMENT_CONFIG_JSON='{"arch":"gat","hidden_dim":64,...}' \
+    METAOPT_WORKSPACE='.' \
     python3 scripts/ray_runner.py
 
-Called by metaopt queue infrastructure on the head node.
+    # Older env vars still accepted as fallback:
+    METAOPT_TRIAL_CONFIG='{"arch":"gat",...}' METAOPT_RESULT_PATH='result.json' \
+    python3 scripts/ray_runner.py
 """
 
 from __future__ import annotations
@@ -24,8 +46,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-# Project root: prefer env override, then cwd, then fallback
-PROJECT_ROOT = Path(os.environ.get('DG_PROJECT_ROOT', os.getcwd()))
+# Project root: prefer env override, then queue workspace, then cwd.
+PROJECT_ROOT = Path(
+    os.environ.get("DG_PROJECT_ROOT")
+    or os.environ.get("METAOPT_WORKSPACE")
+    or os.getcwd()
+)
 
 
 def get_default_config():
@@ -188,20 +214,55 @@ def run_trial(config: dict) -> dict:
 
     return output
 
-def main():
-    # Read config from environment
-    config_json = os.environ.get('METAOPT_TRIAL_CONFIG', '{}')
-    result_path = os.environ.get('METAOPT_RESULT_PATH', 'result.json')
+def _compute_aggregate_metric(by_dataset: dict) -> float:
+    """Weighted mean of dataset metrics matching the campaign objective aggregation."""
+    WEIGHTS = {'bidmc_val': 0.55, 'bidmc_val_adversarial': 0.45}
+    total_weight = sum(WEIGHTS.get(k, 1.0) for k in by_dataset)
+    if not by_dataset or total_weight == 0:
+        return 0.0
+    return sum(v * WEIGHTS.get(k, 1.0) / total_weight for k, v in by_dataset.items())
+
+
+def _load_trial_config(workspace: Path) -> dict:
+    config_json = (
+        os.environ.get('METAOPT_EXPERIMENT_CONFIG_JSON')
+        or os.environ.get('METAOPT_TRIAL_CONFIG')
+    )
+    if config_json:
+        return json.loads(config_json)
+
+    config_path = workspace / "experiment_config.json"
+    if config_path.exists():
+        return json.loads(config_path.read_text())
+    return {}
+
+
+def main() -> int:
+    # Workspace: where metrics.json is written (required by queue contract)
+    workspace = Path(os.environ.get('METAOPT_WORKSPACE', '.'))
+
+    # Legacy: also write flat result to METAOPT_RESULT_PATH if set
+    legacy_result_path = os.environ.get('METAOPT_RESULT_PATH')
 
     # Merge with defaults
     config = get_default_config()
     try:
-        trial_config = json.loads(config_json)
+        trial_config = _load_trial_config(workspace)
         config.update(trial_config)
     except json.JSONDecodeError as e:
-        result = {'boundary_f1_600ms': 0.0, 'error': f'Invalid config JSON: {e}', 'status': 'FAILED'}
-        Path(result_path).write_text(json.dumps(result, indent=2))
-        sys.exit(1)
+        failure = {
+            'best_result': {
+                'aggregate_metric': 0.0,
+                'by_dataset': {'bidmc_val': 0.0},
+            },
+            'error': f'Invalid config JSON: {e}',
+            'status': 'FAILED',
+        }
+        (workspace / 'results').mkdir(parents=True, exist_ok=True)
+        (workspace / 'results' / 'metrics.json').write_text(json.dumps(failure, indent=2))
+        if legacy_result_path:
+            Path(legacy_result_path).write_text(json.dumps(failure, indent=2))
+        return 1
 
     # Apply stage-aware config shaping (canonical function in dispatch_policy)
     from dispatch_policy import prepare_stage_config
@@ -221,13 +282,36 @@ def main():
             'status': 'FAILED',
         }
 
-    # Write result
-    Path(result_path).parent.mkdir(parents=True, exist_ok=True)
-    Path(result_path).write_text(json.dumps(result, indent=2))
-    print(f"\nResult written to {result_path}")
-    print(f"  boundary_f1_600ms: {result.get('boundary_f1_600ms', 'N/A')}")
-    print(f"  rate_mae_bpm: {result.get('rate_mae_bpm', 'N/A')}")
+    # Build metrics.json payload for the queue contract
+    by_dataset = result.get('by_dataset', {'bidmc_val': result.get('boundary_f1_600ms', 0.0)})
+    aggregate_metric = _compute_aggregate_metric(by_dataset)
+    metrics = {
+        'best_result': {
+            'aggregate_metric': aggregate_metric,
+            'by_dataset': by_dataset,
+        },
+        'utilization': {
+            'wall_time_seconds': result.get('wall_time_seconds', 0.0),
+            'n_epochs_run': result.get('n_epochs_run', 0),
+            'n_params': result.get('n_params', 0),
+        },
+        'full_result': result,
+    }
+
+    (workspace / 'results').mkdir(parents=True, exist_ok=True)
+    metrics_path = workspace / 'results' / 'metrics.json'
+    metrics_path.write_text(json.dumps(metrics, indent=2))
+    print(f"\nMetrics written to {metrics_path}")
+    print(f"  aggregate_metric: {aggregate_metric:.4f}")
+    print(f"  by_dataset: {by_dataset}")
     print(f"  status: {result.get('status', 'UNKNOWN')}")
 
+    # Legacy compat: also write flat result to METAOPT_RESULT_PATH if set
+    if legacy_result_path:
+        Path(legacy_result_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(legacy_result_path).write_text(json.dumps(result, indent=2))
+        print(f"  (legacy) Result also written to {legacy_result_path}")
+    return 0
+
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main())
