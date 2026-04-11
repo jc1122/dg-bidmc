@@ -15,9 +15,26 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch_geometric.loader import DataLoader
+from torch.utils.data import SubsetRandomSampler
+import bisect
 
 from model import build_model, count_parameters
 from graph_features import compute_feature_dims, cache_split_graphs
+
+
+def drop_edges(edge_index, edge_attr, drop_rate: float):
+    """Randomly drop edges during training (DropEdge regularization).
+    
+    Preserves graph connectivity by dropping edges independently with
+    probability `drop_rate`. Works on batched PyG graphs.
+    """
+    if drop_rate <= 0:
+        return edge_index, edge_attr
+    n_edges = edge_index.size(1)
+    mask = torch.rand(n_edges, device=edge_index.device) >= drop_rate
+    new_edge_index = edge_index[:, mask]
+    new_edge_attr = edge_attr[mask] if edge_attr is not None else None
+    return new_edge_index, new_edge_attr
 
 
 def _apply_soft_labels(batch, sigma: float, tol: int) -> torch.Tensor:
@@ -194,14 +211,21 @@ def train_one_epoch(model, loader, optimizer, config, device):
     focal_alpha = config.get('focal_alpha', 0.25)
     label_sigma = config.get('label_sigma', 0)
     tol_samples = config.get('tol_samples_train', 75)
+    edge_drop_rate = config.get('edge_drop_rate', 0.0)
     
     for batch in loader:
         try:
             batch = batch.to(device)
             optimizer.zero_grad()
             
-            out = model(batch.x, batch.edge_index, 
-                         edge_attr=batch.edge_attr if hasattr(batch, 'edge_attr') else None,
+            # DropEdge regularization (P85)
+            ei = batch.edge_index
+            ea = batch.edge_attr if hasattr(batch, 'edge_attr') else None
+            if edge_drop_rate > 0:
+                ei, ea = drop_edges(ei, ea, edge_drop_rate)
+            
+            out = model(batch.x, ei, 
+                         edge_attr=ea,
                          batch=batch.batch if hasattr(batch, 'batch') else None)
             
             # Compute soft labels on-the-fly if label_sigma > 0
@@ -806,6 +830,151 @@ def make_scheduler(optimizer, config, n_epochs):
             optimizer, mode='max', factor=0.5, patience=5)
     return None
 
+
+def compute_patient_difficulty(patient_profiles_path='results/patient_profiles.json',
+                                train_patients=None,
+                                weights=None):
+    """Compute difficulty scores and return patient_order dict.
+
+    Args:
+        patient_profiles_path: path to patient_profiles.json
+        train_patients: list of training patient IDs
+        weights: dict with keys drift_cv, cv_ibi, sigh_fraction, inv_snr
+            Default: {drift_cv: 0.35, cv_ibi: 0.30, sigh_fraction: 0.20, inv_snr: 0.15}
+
+    Returns:
+        patient_order: dict mapping patient_id -> rank (0=easiest, N-1=hardest)
+    """
+    if weights is None:
+        weights = {'drift_cv': 0.35, 'cv_ibi': 0.30, 'sigh_fraction': 0.20, 'inv_snr': 0.15}
+
+    # Load patient profiles
+    with open(patient_profiles_path, 'r') as f:
+        profiles = json.load(f)
+
+    # Filter to training patients if specified
+    if train_patients is not None:
+        profiles = {pid: v for pid, v in profiles.items() if pid in train_patients}
+
+    if not profiles:
+        return {}
+
+    patient_ids = list(profiles.keys())
+
+    # Extract raw metric values
+    raw = {
+        'drift_cv':      np.array([profiles[p].get('drift_cv', 0.0)      for p in patient_ids], dtype=float),
+        'cv_ibi':        np.array([profiles[p].get('cv_ibi', 0.0)        for p in patient_ids], dtype=float),
+        'sigh_fraction': np.array([profiles[p].get('sigh_fraction', 0.0) for p in patient_ids], dtype=float),
+        'inv_snr':       np.array([1.0 / max(profiles[p].get('snr_db', 1.0), 1e-6) for p in patient_ids], dtype=float),
+    }
+
+    # Min-max normalize each metric
+    composite = np.zeros(len(patient_ids), dtype=float)
+    for metric, arr in raw.items():
+        mn, mx = arr.min(), arr.max()
+        if mx > mn:
+            norm = (arr - mn) / (mx - mn)
+        else:
+            norm = np.zeros_like(arr)
+        composite += weights.get(metric, 0.0) * norm
+
+    # Sort by composite score ascending (0=easiest)
+    order = np.argsort(composite)
+    patient_order = {patient_ids[order[i]]: i for i in range(len(patient_ids))}
+    return patient_order
+
+
+def get_curriculum_loader(train_data, epoch, total_epochs, patient_order,
+                           batch_size, curriculum_stages=None,
+                           train_dir=None):
+    """Return DataLoader with curriculum-filtered patient graphs for this epoch.
+
+    Args:
+        train_data: list of PyG Data objects
+        epoch: current epoch number (0-indexed)
+        total_epochs: total number of epochs
+        patient_order: dict mapping patient_id -> difficulty rank (0=easiest)
+        batch_size: batch size for DataLoader
+        curriculum_stages: list of [end_epoch, patient_fraction, hard_upsample_factor]
+            Default: [[25, 0.5, 1], [50, 0.75, 1], [75, 1.0, 1], [100, 1.0, 2]]
+        train_dir: directory of .pt files (used to derive patient IDs from filenames)
+
+    Returns:
+        DataLoader with appropriate patient sampling for the current epoch
+    """
+    if curriculum_stages is None:
+        curriculum_stages = [[25, 0.5, 1], [50, 0.75, 1], [75, 1.0, 1], [100, 1.0, 2]]
+
+    # Determine current stage
+    current_fraction = 1.0
+    hard_upsample = 1
+    for stage in curriculum_stages:
+        end_ep, frac, upsample = stage
+        if epoch < end_ep:
+            current_fraction = frac
+            hard_upsample = upsample
+            break
+    else:
+        # Past all stages: use last stage settings
+        last = curriculum_stages[-1]
+        current_fraction = last[1]
+        hard_upsample = last[2]
+
+    # Build index -> patient_id mapping from filenames if patient_order provided
+    n = len(train_data)
+    if patient_order and train_dir is not None:
+        files = sorted(Path(train_dir).glob("*.pt"))
+        # Extract patient ID: filename stem up to first '_w' or first '_' before window
+        idx_to_pid = {}
+        for i, fpath in enumerate(files):
+            stem = fpath.stem  # e.g. bidmc43_w0039
+            # Extract patient id: part before '_w' window marker
+            if '_w' in stem:
+                pid = stem[:stem.index('_w')]
+            else:
+                # fallback: everything before the last underscore
+                pid = stem.rsplit('_', 1)[0] if '_' in stem else stem
+            idx_to_pid[i] = pid
+    else:
+        idx_to_pid = {}
+
+    # Determine how many patients to include
+    if not patient_order or not idx_to_pid:
+        # No curriculum info: include all
+        indices = list(range(n))
+    else:
+        n_patients = len(patient_order)
+        n_include = max(1, int(round(n_patients * current_fraction)))
+        # Include the n_include easiest patients (lowest rank)
+        included_pids = {pid for pid, rank in patient_order.items() if rank < n_include}
+        # Hard patients: top 25% by difficulty among included
+        hard_threshold = int(round(n_include * 0.75))
+        hard_pids = {pid for pid, rank in patient_order.items() if rank >= hard_threshold and rank < n_include}
+
+        # Build index lists
+        easy_indices = []
+        hard_indices = []
+        for i in range(n):
+            pid = idx_to_pid.get(i)
+            if pid in included_pids:
+                if pid in hard_pids:
+                    hard_indices.append(i)
+                else:
+                    easy_indices.append(i)
+
+        # Combine: easy + hard + (hard * (upsample-1))
+        indices = easy_indices + hard_indices
+        if hard_upsample > 1:
+            indices = indices + hard_indices * (hard_upsample - 1)
+
+        if not indices:
+            indices = list(range(n))
+
+    sampler = SubsetRandomSampler(indices)
+    return DataLoader(train_data, batch_size=batch_size, sampler=sampler)
+
+
 def train(config: dict, train_dir: str, val_dir: str,
           val_adv_dir: str | None = None,
           device: str = 'cuda', verbose: bool = True) -> dict:
@@ -834,6 +1003,33 @@ def train(config: dict, train_dir: str, val_dir: str,
     
     if verbose:
         print(f"Train: {len(train_data)} graphs, Val: {len(val_data)}, Val-Adv: {len(val_adv_data)}")
+
+    # Curriculum learning setup
+    patient_order = None
+    use_curriculum = config.get('curriculum', False)
+    if use_curriculum:
+        # Derive training patient IDs from filenames in train_dir
+        train_files = sorted(Path(train_dir).glob("*.pt"))
+        train_pids = set()
+        for fpath in train_files:
+            stem = fpath.stem
+            if '_w' in stem:
+                pid = stem[:stem.index('_w')]
+            else:
+                pid = stem.rsplit('_', 1)[0] if '_' in stem else stem
+            train_pids.add(pid)
+        train_patients_list = list(train_pids)
+
+        profiles_path = config.get('patient_profiles_path', 'results/patient_profiles.json')
+        diff_weights = config.get('curriculum_difficulty_weights', None)
+        patient_order = compute_patient_difficulty(
+            patient_profiles_path=profiles_path,
+            train_patients=train_patients_list,
+            weights=diff_weights,
+        )
+        if verbose:
+            sorted_pids = sorted(patient_order, key=lambda p: patient_order[p])
+            print(f"  Curriculum: {len(patient_order)} patients ranked (easiest first): {sorted_pids[:5]} ...")
     
     # Build model
     in_dim, edge_dim = compute_feature_dims(config)
@@ -845,7 +1041,11 @@ def train(config: dict, train_dir: str, val_dir: str,
     
     # Data loaders
     batch_size = config.get('batch_size', 32)
-    train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
+    if use_curriculum:
+        # Curriculum: train_loader rebuilt each epoch; placeholder here
+        train_loader = None
+    else:
+        train_loader = DataLoader(train_data, batch_size=batch_size, shuffle=True)
     val_loader = DataLoader(val_data, batch_size=batch_size)
     val_adv_loader = DataLoader(val_adv_data, batch_size=batch_size) if val_adv_data else None
     
@@ -873,9 +1073,42 @@ def train(config: dict, train_dir: str, val_dir: str,
     no_improve = 0
     history = []
     
+    # Curriculum stage boundaries for LR warmup
+    _curriculum_stages = config.get('curriculum_stages', [[25, 0.5, 1], [50, 0.75, 1], [75, 1.0, 1], [100, 1.0, 2]])
+    _prev_stage_idx = -1
+
     gpu_fell_back = False
     for epoch in range(n_epochs):
         t0 = time.time()
+
+        # Rebuild train_loader each epoch for curriculum learning
+        if use_curriculum:
+            train_loader = get_curriculum_loader(
+                train_data, epoch, n_epochs, patient_order,
+                batch_size, curriculum_stages=_curriculum_stages,
+                train_dir=train_dir,
+            )
+            # LR warmup at stage boundaries
+            if config.get('curriculum_lr_warmup', True):
+                cur_stage_idx = 0
+                for si, stage in enumerate(_curriculum_stages):
+                    if epoch < stage[0]:
+                        cur_stage_idx = si
+                        break
+                else:
+                    cur_stage_idx = len(_curriculum_stages) - 1
+                if cur_stage_idx != _prev_stage_idx and epoch > 0:
+                    if verbose:
+                        print(f"  Curriculum stage {cur_stage_idx} at epoch {epoch}: resetting LR to {lr:.2e}")
+                    for pg in optimizer.param_groups:
+                        pg['lr'] = lr
+                    # Compute stage length for cosine scheduler
+                    stage_start = _curriculum_stages[cur_stage_idx - 1][0] if cur_stage_idx > 0 else 0
+                    stage_end = _curriculum_stages[cur_stage_idx][0]
+                    stage_len = max(stage_end - stage_start, 1)
+                    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=stage_len)
+                _prev_stage_idx = cur_stage_idx
+
         train_loss, device = train_one_epoch(model, train_loader, optimizer, config, device)
         if not gpu_fell_back and device == 'cpu' and config.get('_original_device', 'cuda') != 'cpu':
             gpu_fell_back = True
