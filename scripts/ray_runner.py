@@ -259,7 +259,7 @@ def main() -> int:
             'status': 'FAILED',
         }
         (workspace / 'results').mkdir(parents=True, exist_ok=True)
-        (workspace / 'results' / 'metrics.json').write_text(json.dumps(failure, indent=2))
+        (workspace / 'metrics.json').write_text(json.dumps(failure, indent=2))
         if legacy_result_path:
             Path(legacy_result_path).write_text(json.dumps(failure, indent=2))
         return 1
@@ -299,7 +299,7 @@ def main() -> int:
     }
 
     (workspace / 'results').mkdir(parents=True, exist_ok=True)
-    metrics_path = workspace / 'results' / 'metrics.json'
+    metrics_path = workspace / 'metrics.json'
     metrics_path.write_text(json.dumps(metrics, indent=2))
     print(f"\nMetrics written to {metrics_path}")
     print(f"  aggregate_metric: {aggregate_metric:.4f}")

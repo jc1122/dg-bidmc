@@ -43,7 +43,7 @@ def test_main_writes_metrics_contract_from_experiment_env(tmp_path, monkeypatch)
     assert module.main() == 0
     assert observed["lr"] == 0.02
 
-    metrics_path = workspace / "results" / "metrics.json"
+    metrics_path = workspace / "metrics.json"
     assert metrics_path.exists()
     metrics = json.loads(metrics_path.read_text())
     assert metrics["best_result"]["aggregate_metric"] == 0.73
