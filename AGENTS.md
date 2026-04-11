@@ -509,7 +509,12 @@ Follow `RESEARCH_PLAN.md`. The implementation sequence is:
 Tests go in `tests/`. Run with `python -m pytest tests/ -v`.
 
 ## Active task
-`.ml-metaopt/state.json` exists. Inspect its `status`.
+.ml-metaopt/state.json exists. Inspect its `status`.
 If `status` is `RUNNING`, invoke the `ml-metaoptimization` skill immediately,
 resume from `machine_state`, and do not ask the user for campaign inputs.
-If `status` is terminal, remove this block, stop auto-resuming, and surface `next_action` to the operator without executing from it.
+Current resume point: campaign `dg-gat-respiratory-v2`, iteration 16,
+state `DESIGN_EXPERIMENT`, selected proposal `P64`. The design handoff is
+`DESIGN_COMPLETE`, so remain in `DESIGN_EXPERIMENT` long enough to finalize
+the design and then advance to `MATERIALIZE_CHANGESET`.
+If `status` is terminal, remove this block, stop auto-resuming, and surface
+`next_action` to the operator without executing from it.

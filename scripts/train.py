@@ -294,9 +294,48 @@ def nms_1d(bars, scores, min_dist):
     return bars[sorted(keep)]
 
 
+def trough_snap_1d(pred_bars, all_bars, all_is_low, all_scores, all_amplitudes,
+                   snap_window=25, snap_mode='nearest_trough'):
+    """Snap predictions to nearest trough node within snap_window samples.
+    
+    Args:
+        pred_bars: predicted boundary positions after NMS+top_n
+        all_bars: all node positions in the graph
+        all_is_low: boolean/float array, 1.0 for trough nodes
+        all_scores: model scores for all nodes
+        all_amplitudes: amplitude values for all nodes
+        snap_window: max distance in samples to search for troughs
+        snap_mode: 'nearest_trough' | 'highest_score_trough' | 'deepest_trough'
+    
+    Returns:
+        snapped_bars: adjusted boundary positions
+    """
+    if len(pred_bars) == 0:
+        return pred_bars
+    snapped = []
+    for pb in pred_bars:
+        dists = np.abs(all_bars.astype(np.float64) - float(pb))
+        candidates = (dists <= snap_window) & (all_is_low > 0.5)
+        if not candidates.any():
+            snapped.append(pb)
+            continue
+        cand_idx = np.where(candidates)[0]
+        if snap_mode == 'nearest_trough':
+            best = cand_idx[np.argmin(dists[cand_idx])]
+        elif snap_mode == 'highest_score_trough':
+            best = cand_idx[np.argmax(all_scores[cand_idx])]
+        elif snap_mode == 'deepest_trough':
+            best = cand_idx[np.argmin(all_amplitudes[cand_idx])]
+        else:
+            best = cand_idx[np.argmin(dists[cand_idx])]
+        snapped.append(all_bars[best])
+    return np.array(snapped, dtype=pred_bars.dtype)
+
+
+
 @torch.no_grad()
 def evaluate(model, loader, device, threshold=0.5, tol_samples=75, fs=125,
-             nms_dist=0, top_n=0):
+             nms_dist=0, top_n=0, snap_window=0, snap_mode='nearest_trough'):
     """Evaluate model on a data loader. Returns dict with metrics.
     
     Args:
@@ -333,20 +372,11 @@ def evaluate(model, loader, device, threshold=0.5, tol_samples=75, fs=125,
             g_bars = node_bars[mask]
             g_labels = labels[mask]
             
-            above = g_scores > threshold
-            if nms_dist > 0 and above.sum() > 0:
-                pred_troughs = nms_1d(g_bars[above], g_scores[above], nms_dist)
-            else:
-                pred_troughs = g_bars[above]
-            
-            # Top-N constraint: keep only highest-scored predictions
-            if top_n > 0 and len(pred_troughs) > top_n:
-                pred_scores = np.array([
-                    g_scores[np.argmin(np.abs(g_bars - pb))]
-                    for pb in pred_troughs
-                ])
-                keep_idx = np.argsort(-pred_scores)[:top_n]
-                pred_troughs = np.sort(pred_troughs[keep_idx])
+            # Use _apply_post_processing for consistency with snap support
+            g_features = batch.x[mask].cpu().numpy() if hasattr(batch, 'x') and batch.x is not None and snap_window > 0 else None
+            pred_troughs = _apply_post_processing(
+                g_scores, g_bars, threshold, nms_dist, top_n,
+                g_features=g_features, snap_window=snap_window, snap_mode=snap_mode)
             
             gt_troughs = g_bars[g_labels > 0.5]
             
@@ -539,7 +569,7 @@ def _composite_nms_1d(bars, scores, duration, amplitude, min_dist,
 def _apply_post_processing(g_scores, g_bars, threshold, nms_dist, top_n,
                            adaptive_nms_frac=0.0, adaptive_top_n=False,
                            g_features=None, cnms_alpha=1.0, cnms_beta=0.0,
-                           cnms_gamma=0.0):
+                           cnms_gamma=0.0, snap_window=0, snap_mode='nearest_trough'):
     """Apply threshold → NMS → top_n pipeline for one graph.
     
     If adaptive_nms_frac > 0, NMS distance = max(nms_dist, frac × median_spacing)
@@ -605,12 +635,21 @@ def _apply_post_processing(g_scores, g_bars, threshold, nms_dist, top_n,
             keep_idx = np.argsort(-_ps)[:eff_top_n]
         pred_troughs = np.sort(pred_troughs[keep_idx])
     
+    # Trough snapping: snap to nearest trough node
+    if snap_window > 0 and g_features is not None and len(pred_troughs) > 0:
+        all_is_low = g_features[:, 2]    # is_low column
+        all_amplitudes = g_features[:, 3] # amplitude_norm column
+        pred_troughs = trough_snap_1d(
+            pred_troughs, g_bars, all_is_low, g_scores, all_amplitudes,
+            snap_window=snap_window, snap_mode=snap_mode)
+    
     return pred_troughs
 
 
 def _eval_threshold(graph_preds, threshold, nms_dist, top_n, tol_samples, fs=125,
                     adaptive_nms_frac=0.0, adaptive_top_n=False,
-                    cnms_alpha=1.0, cnms_beta=0.0, cnms_gamma=0.0):
+                    cnms_alpha=1.0, cnms_beta=0.0, cnms_gamma=0.0,
+                    snap_window=0, snap_mode='nearest_trough'):
     """Pure-numpy threshold evaluation on pre-collected predictions.
     
     graph_preds entries may be (scores, bars, labels) or
@@ -625,7 +664,8 @@ def _eval_threshold(graph_preds, threshold, nms_dist, top_n, tol_samples, fs=125
             adaptive_nms_frac=adaptive_nms_frac,
             adaptive_top_n=adaptive_top_n,
             g_features=g_feats, cnms_alpha=cnms_alpha,
-            cnms_beta=cnms_beta, cnms_gamma=cnms_gamma)
+            cnms_beta=cnms_beta, cnms_gamma=cnms_gamma,
+            snap_window=snap_window, snap_mode=snap_mode)
         gt_troughs = g_bars[g_labels > 0.5]
         all_f1s.append(compute_boundary_f1(pred_troughs, gt_troughs, tol_samples))
     return float(np.mean(all_f1s)) if all_f1s else 0.0
@@ -634,7 +674,7 @@ def _eval_threshold(graph_preds, threshold, nms_dist, top_n, tol_samples, fs=125
 def optimize_threshold(model, loader, device, tol_samples=75, fs=125,
                        nms_dist=0, window_breaths=6, adaptive_nms=False,
                        mc_samples=1, calibration_method='none', calibration_params=None,
-                       composite_nms=False):
+                       composite_nms=False, snap_search=False):
     """Search for threshold+NMS+top_n that maximizes boundary F1.
     
     Collects model predictions once, then does fast numpy grid search.
@@ -654,6 +694,8 @@ def optimize_threshold(model, loader, device, tol_samples=75, fs=125,
     best_anms_frac = 0.0
     best_atopn = False
     best_cnms = (1.0, 0.0, 0.0)  # (alpha, beta, gamma)
+    best_snap_window = 0
+    best_snap_mode = 'nearest_trough' 
     
     # NMS fractions to try: 0 = off, 0.3-0.7 = fraction of median breath spacing
     anms_fracs = [0.0]
@@ -670,6 +712,15 @@ def optimize_threshold(model, loader, device, tol_samples=75, fs=125,
                 for cg in [0.1, 0.15, 0.2, 0.225]:
                     cnms_configs.append((ca, cb, cg))
     
+    # Snap parameters to try
+    snap_configs = [(0, 'nearest_trough')]  # baseline: no snapping
+    if snap_search:
+        snap_windows = [15, 25, 35, 50, 75]
+        snap_modes = ['nearest_trough', 'highest_score_trough', 'deepest_trough']
+        for sw in snap_windows:
+            for sm in snap_modes:
+                snap_configs.append((sw, sm))
+    
     # Phase 1: coarse grid
     for thresh in np.arange(0.05, 0.90, 0.05):
         for nd in [0, 50, 75, 100, 120, 150, 200]:
@@ -677,18 +728,22 @@ def optimize_threshold(model, loader, device, tol_samples=75, fs=125,
                 for af in anms_fracs:
                     for at in atopn_opts:
                         for ca, cb, cg in cnms_configs:
-                            f1 = _eval_threshold(
-                                graph_preds, thresh, nd, tn, tol_samples, fs,
-                                adaptive_nms_frac=af, adaptive_top_n=at,
-                                cnms_alpha=ca, cnms_beta=cb, cnms_gamma=cg)
-                            if f1 > best_f1:
-                                best_f1 = f1
-                                best_thresh = float(thresh)
-                                best_nms = int(nd)
-                                best_top_n = int(tn)
-                                best_anms_frac = float(af)
-                                best_atopn = bool(at)
-                                best_cnms = (ca, cb, cg)
+                            for sw, sm in snap_configs:
+                                f1 = _eval_threshold(
+                                    graph_preds, thresh, nd, tn, tol_samples, fs,
+                                    adaptive_nms_frac=af, adaptive_top_n=at,
+                                    cnms_alpha=ca, cnms_beta=cb, cnms_gamma=cg,
+                                    snap_window=sw, snap_mode=sm)
+                                if f1 > best_f1:
+                                    best_f1 = f1
+                                    best_thresh = float(thresh)
+                                    best_nms = int(nd)
+                                    best_top_n = int(tn)
+                                    best_anms_frac = float(af)
+                                    best_atopn = bool(at)
+                                    best_cnms = (ca, cb, cg)
+                                    best_snap_window = int(sw)
+                                    best_snap_mode = str(sm)
     
     # Phase 2: fine search around best
     fine_anms = [best_anms_frac]
@@ -727,7 +782,7 @@ def optimize_threshold(model, loader, device, tol_samples=75, fs=125,
                             best_anms_frac = float(af)
                             best_cnms = (ca, cb, cg)
     
-    return best_thresh, best_nms, best_f1, best_top_n, best_anms_frac, best_atopn, best_cnms
+    return best_thresh, best_nms, best_f1, best_top_n, best_anms_frac, best_atopn, best_cnms, best_snap_window, best_snap_mode
 
 def make_scheduler(optimizer, config, n_epochs):
     """Create LR scheduler from config."""
@@ -967,7 +1022,7 @@ def train(config: dict, train_dir: str, val_dir: str,
                 print(f"  Platt scaling: slope={slope:.3f}, intercept={intercept:.3f}")
     
     use_cnms = config.get('composite_nms', False)
-    opt_thresh, opt_nms, opt_f1, opt_top_n, opt_anms_frac, opt_atopn, opt_cnms = optimize_threshold(
+    opt_thresh, opt_nms, opt_f1, opt_top_n, opt_anms_frac, opt_atopn, opt_cnms, opt_snap_win, opt_snap_mode = optimize_threshold(
         model_cpu, val_loader, pp_device, tol_samples=tol, window_breaths=wb,
         adaptive_nms=use_adaptive, mc_samples=mc_samples,
         calibration_method=cal_method, calibration_params=cal_params,
@@ -981,6 +1036,8 @@ def train(config: dict, train_dir: str, val_dir: str,
             extra += ", adaptive_top_n=True"
         if opt_cb > 0 or opt_cg > 0:
             extra += f", cnms=({opt_ca:.2f},{opt_cb:.3f},{opt_cg:.3f})"
+        if opt_snap_win > 0:
+            extra += f", snap=({opt_snap_win},{opt_snap_mode})"
         print(f"  Threshold opt: thresh={opt_thresh:.2f}, nms={opt_nms}, top_n={opt_top_n}{extra}, val_f1={opt_f1:.4f} (was {best_metrics.get('val_f1', 0):.4f})")
 
     # Re-evaluate with optimized threshold
@@ -990,7 +1047,8 @@ def train(config: dict, train_dir: str, val_dir: str,
                                      include_features=use_cnms)
     final_val_f1 = _eval_threshold(val_preds, opt_thresh, opt_nms, opt_top_n, tol,
                                    adaptive_nms_frac=opt_anms_frac, adaptive_top_n=opt_atopn,
-                                   cnms_alpha=opt_ca, cnms_beta=opt_cb, cnms_gamma=opt_cg)
+                                   cnms_alpha=opt_ca, cnms_beta=opt_cb, cnms_gamma=opt_cg,
+                                   snap_window=opt_snap_win, snap_mode=opt_snap_mode)
     final_val_rate = evaluate(model_cpu, val_loader, pp_device, threshold=opt_thresh,
                               tol_samples=tol, nms_dist=opt_nms, top_n=opt_top_n)['rate_mae_bpm']
     

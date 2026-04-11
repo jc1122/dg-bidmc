@@ -370,3 +370,177 @@ def make_adversarial_sentence(
     # Signal distortion
     result["signal"] = apply_adversarial(result["signal"], config, rng)
     return result
+
+
+# ── 8. Temporal signal augmentation primitives (P77) ─────────────────────────
+
+def time_stretch_signal(signal: np.ndarray, factor: float) -> np.ndarray:
+    """Resample signal by *factor* then restore original length.
+
+    factor < 1 → faster breathing (compressed time);
+    factor > 1 → slower breathing (stretched time).
+    Clipped to [0.5, 2.0] for safety.
+
+    Parameters
+    ----------
+    signal : np.ndarray
+        1-D float signal.
+    factor : float
+        Time-stretch factor.
+
+    Returns
+    -------
+    np.ndarray
+        C-contiguous float64 array of the same length as *signal*.
+    """
+    from scipy.signal import resample as sp_resample
+
+    factor = float(np.clip(factor, 0.5, 2.0))
+    n_orig = len(signal)
+    new_len = int(round(n_orig * factor))
+    if new_len < 1:
+        new_len = 1
+
+    stretched = sp_resample(signal.astype(np.float64), new_len)
+
+    # Re-interpolate back to original length
+    result = np.interp(
+        np.linspace(0, 1, n_orig),
+        np.linspace(0, 1, new_len),
+        stretched,
+    )
+    return np.ascontiguousarray(result, dtype=np.float64)
+
+
+def amplitude_modulate(signal: np.ndarray, scale: float) -> np.ndarray:
+    """Multiply zero-mean signal by *scale*, then restore DC offset.
+
+    scale in [0.7, 1.4] (clipped internally).
+
+    Parameters
+    ----------
+    signal : np.ndarray
+        1-D float signal.
+    scale : float
+        Amplitude scale factor.
+
+    Returns
+    -------
+    np.ndarray
+        C-contiguous float64 modulated signal.
+    """
+    scale = float(np.clip(scale, 0.7, 1.4))
+    sig = signal.astype(np.float64)
+    mean = sig.mean()
+    result = (sig - mean) * scale + mean
+    return np.ascontiguousarray(result, dtype=np.float64)
+
+
+def sinusoidal_drift(
+    signal: np.ndarray,
+    fs: int,
+    amp_frac: float,
+    freq_hz: float,
+    phase_offset: float = 0.0,
+) -> np.ndarray:
+    """Add a slow sinusoidal baseline drift to *signal*.
+
+    Parameters
+    ----------
+    signal : np.ndarray
+        1-D float signal.
+    fs : int
+        Sampling frequency in Hz.
+    amp_frac : float
+        Drift amplitude as a fraction of signal std (e.g. 0.10 = 10 % of std).
+    freq_hz : float
+        Drift frequency in Hz (typically 0.01–0.05, well below respiration).
+    phase_offset : float
+        Phase offset in radians (default 0).
+
+    Returns
+    -------
+    np.ndarray
+        C-contiguous float64 signal with sinusoidal drift added.
+    """
+    sig = signal.astype(np.float64)
+    amp = amp_frac * np.std(sig)
+    t = np.arange(len(sig))
+    drift = amp * np.sin(2.0 * np.pi * freq_hz / fs * t + phase_offset)
+    return np.ascontiguousarray(sig + drift, dtype=np.float64)
+
+
+def sigh_inject(
+    signal: np.ndarray,
+    local_troughs: list,
+    rng: np.random.Generator,
+    scale_min: float = 1.5,
+    scale_max: float = 2.5,
+    n_sighs: int = 1,
+) -> np.ndarray:
+    """Simulate sigh events by amplifying random inter-trough segments.
+
+    Picks *n_sighs* random adjacent-trough pairs and scales the breath
+    amplitude by a factor in [*scale_min*, *scale_max*].  A 10-sample
+    Hanning taper is applied at each boundary to avoid discontinuities.
+    Trough positions are NOT changed (amplitude modification does not shift
+    trough positions).
+
+    Parameters
+    ----------
+    signal : np.ndarray
+        1-D float signal.
+    local_troughs : list of int
+        Window-local trough sample indices.
+    rng : np.random.Generator
+        NumPy random generator.
+    scale_min, scale_max : float
+        Range for amplitude scale factor.
+    n_sighs : int
+        Number of sigh events to inject.
+
+    Returns
+    -------
+    np.ndarray
+        C-contiguous float64 modified signal copy.
+    """
+    out = signal.astype(np.float64).copy()
+    troughs = [int(t) for t in local_troughs]
+
+    if len(troughs) < 2:
+        return np.ascontiguousarray(out, dtype=np.float64)
+
+    n_sighs = min(n_sighs, len(troughs) - 1)
+    n_pairs = len(troughs) - 1
+    chosen_indices = rng.choice(n_pairs, size=n_sighs, replace=False)
+
+    taper_len = min(10, 5)  # 10-sample Hanning taper, but never > seg half-length
+
+    for idx in chosen_indices:
+        t_start = troughs[idx]
+        t_end = troughs[idx + 1]
+        seg_len = t_end - t_start
+        if seg_len < 2:
+            continue
+
+        seg = out[t_start:t_end].copy()
+        mean_val = seg.mean()
+        scale = rng.uniform(scale_min, scale_max)
+        scaled = (seg - mean_val) * scale + mean_val
+
+        # Build smooth taper: ramp up at start, ramp down at end
+        actual_taper = min(taper_len, seg_len // 4)
+        if actual_taper > 0:
+            hann_up = np.hanning(actual_taper * 2)[:actual_taper]
+            hann_down = np.hanning(actual_taper * 2)[actual_taper:]
+            taper = np.ones(seg_len)
+            taper[:actual_taper] = hann_up
+            taper[-actual_taper:] = hann_down
+            # Blend: original * (1-taper) + scaled * taper
+            blended = out[t_start:t_end] * (1.0 - taper) + scaled * taper
+        else:
+            blended = scaled
+
+        out[t_start:t_end] = blended
+
+    return np.ascontiguousarray(out, dtype=np.float64)

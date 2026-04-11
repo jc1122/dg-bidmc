@@ -70,6 +70,152 @@ def augment_signal(
 
     return out
 
+
+def augment_signal_with_troughs(
+    signal: np.ndarray,
+    troughs: list,
+    config: dict | None = None,
+    rng: np.random.Generator | None = None,
+    fs: int = 125,
+) -> tuple:
+    """Apply temporal signal augmentations and return (augmented_signal, adjusted_troughs).
+
+    Applies augmentations in order: time_stretch → amplitude → drift → sigh → noise.
+    When time-stretching is applied, trough positions are scaled by the same factor
+    and clipped to [0, len(signal)-1].  This ensures ground-truth labels remain
+    correctly aligned after time-warping.
+
+    Parameters
+    ----------
+    signal : np.ndarray
+        1-D float64 signal window.
+    troughs : list of int
+        Window-local trough positions.
+    config : dict, optional
+        Augmentation configuration dict.
+    rng : np.random.Generator, optional
+        NumPy random generator.  Created from system entropy if None.
+    fs : int
+        Sampling frequency in Hz.
+
+    Returns
+    -------
+    tuple (aug_signal, aug_troughs)
+        aug_signal : np.ndarray  C-contiguous float64 augmented signal.
+        aug_troughs : list of int  Adjusted (and clipped) trough positions.
+    """
+    from adversarial import (
+        add_pink_noise, add_brown_noise, add_burst_noise,
+        add_dc_drift, add_harmonic_interference,
+        time_stretch_signal, amplitude_modulate, sinusoidal_drift, sigh_inject,
+    )
+
+    if rng is None:
+        rng = np.random.default_rng()
+
+    cfg = config or {}
+    augment_prob = float(cfg.get('augment_prob', 0.85))
+    snr_min = float(cfg.get('augment_snr_min', 20.0))
+    snr_max = float(cfg.get('augment_snr_max', 40.0))
+    drift_min = float(cfg.get('augment_drift_min', 0.0005))
+    drift_max = float(cfg.get('augment_drift_max', 0.003))
+    max_simultaneous = int(cfg.get('augment_max_simultaneous', 2))
+
+    br_min = float(cfg.get('augment_breath_rate_min', 0.8))
+    br_max = float(cfg.get('augment_breath_rate_max', 1.2))
+    amp_min = float(cfg.get('augment_amplitude_min', 0.7))
+    amp_max = float(cfg.get('augment_amplitude_max', 1.4))
+    sigh_min = float(cfg.get('augment_sigh_min_scale', 1.5))
+    sigh_max = float(cfg.get('augment_sigh_max_scale', 2.5))
+    n_sighs_max = int(cfg.get('augment_n_sighs_max', 2))
+    drift_amp_min = float(cfg.get('augment_sinusoidal_drift_amp_frac_min', 0.05))
+    drift_amp_max = float(cfg.get('augment_sinusoidal_drift_amp_frac_max', 0.20))
+    drift_freq_min = float(cfg.get('augment_sinusoidal_drift_freq_hz_min', 0.01))
+    drift_freq_max = float(cfg.get('augment_sinusoidal_drift_freq_hz_max', 0.05))
+
+    out = np.ascontiguousarray(signal, dtype=np.float64)
+    adj_troughs = list(troughs)
+    n_orig = len(out)
+
+    # Build candidate augmentation list in application order
+    # Each entry: (aug_id, probability-gate)
+    all_temporal = [
+        'breath_rate_scaling',
+        'amplitude_modulation',
+        'sinusoidal_drift',
+        'sigh_injection',
+        'pink_noise',
+        'brown_noise',
+        'dc_drift',
+    ]
+    # Determine which types are enabled (config may restrict via augment_types_enabled)
+    enabled_types = cfg.get('augment_types_enabled', all_temporal)
+
+    # Select at most max_simultaneous; each type gated by augment_prob
+    chosen = []
+    for aug_type in all_temporal:
+        if aug_type not in enabled_types:
+            continue
+        if rng.random() < augment_prob:
+            chosen.append(aug_type)
+        if len(chosen) >= max_simultaneous:
+            break
+
+    if not chosen:
+        return out, adj_troughs
+
+    for aug_type in chosen:
+        if aug_type == 'breath_rate_scaling':
+            # time-stretch: also scale trough positions
+            factor = rng.uniform(br_min, br_max)
+            out = time_stretch_signal(out, factor)
+            # Scale and clip trough positions
+            adj_troughs = [
+                int(np.clip(int(round(t * factor)), 0, len(out) - 1))
+                for t in adj_troughs
+            ]
+
+        elif aug_type == 'amplitude_modulation':
+            scale = rng.uniform(amp_min, amp_max)
+            out = amplitude_modulate(out, scale)
+
+        elif aug_type == 'sinusoidal_drift':
+            amp_frac = rng.uniform(drift_amp_min, drift_amp_max)
+            freq_hz = rng.uniform(drift_freq_min, drift_freq_max)
+            phase = rng.uniform(0.0, 2.0 * np.pi)
+            out = sinusoidal_drift(out, fs=fs, amp_frac=amp_frac,
+                                   freq_hz=freq_hz, phase_offset=phase)
+
+        elif aug_type == 'sigh_injection':
+            n_sighs = rng.integers(1, n_sighs_max + 1)
+            out = sigh_inject(out, adj_troughs, rng,
+                              scale_min=sigh_min, scale_max=sigh_max,
+                              n_sighs=int(n_sighs))
+
+        elif aug_type == 'pink_noise':
+            snr = rng.uniform(snr_min, snr_max)
+            out = add_pink_noise(out, snr, rng)
+
+        elif aug_type == 'brown_noise':
+            snr = rng.uniform(snr_min, snr_max)
+            out = add_brown_noise(out, snr, rng)
+
+        elif aug_type == 'dc_drift':
+            drift_rate = rng.uniform(drift_min, drift_max)
+            out = add_dc_drift(out, drift_rate)
+
+        elif aug_type == 'harmonic_interference':
+            out = add_harmonic_interference(out, fs=fs, rng=rng)
+
+    # Ensure output is C-contiguous float64
+    out = np.ascontiguousarray(out, dtype=np.float64)
+    # Clip troughs to valid range (length may have changed slightly due to rounding)
+    max_idx = len(out) - 1
+    adj_troughs = [int(np.clip(t, 0, max_idx)) for t in adj_troughs]
+
+    return out, adj_troughs
+
+
 # ---------------------------------------------------------------------------
 # Default feature configuration — matches campaign search space
 # ---------------------------------------------------------------------------
@@ -729,11 +875,23 @@ def generate_patient_graphs(
         graphs.append(data)
 
         # Generate augmented copies of this window
+        augment_mode = (config or {}).get('augment', '')
         for aug_i in range(n_augmented_copies):
             seed = hash((pid_hash, w, aug_i)) & 0xFFFFFFFF
             aug_rng = np.random.default_rng(seed)
-            aug_seg = augment_signal(seg, aug_rng, config=config, fs=fs)
-            aug_data = extract_graph_data(aug_seg, local_troughs, config=config,
+            if augment_mode == 'signal_temporal':
+                # New temporal augmentation pipeline: adjusts trough positions
+                aug_seg, aug_troughs = augment_signal_with_troughs(
+                    seg, local_troughs, config=config, rng=aug_rng, fs=fs
+                )
+                aug_seg = np.ascontiguousarray(aug_seg, dtype=np.float64)
+                aug_troughs = [int(np.clip(t, 0, len(aug_seg) - 1))
+                               for t in aug_troughs]
+            else:
+                # Existing pipeline: troughs unchanged
+                aug_seg = augment_signal(seg, aug_rng, config=config, fs=fs)
+                aug_troughs = local_troughs
+            aug_data = extract_graph_data(aug_seg, aug_troughs, config=config,
                                           tol_samples=tol_samples, fs=fs)
             if aug_data is not None and aug_data.x.shape[0] > 0:
                 graphs.append(aug_data)
