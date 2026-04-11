@@ -199,7 +199,7 @@ def assign_patient_ids_from_dir(data_list, data_dir):
     )
 
     for data_obj, pid in zip(data_list, pids):
-        data_obj.patient_idx = pid_to_idx[pid]
+        data_obj.patient_idx = torch.tensor(pid_to_idx[pid], dtype=torch.long)
 
     return data_list, pid_to_idx, len(unique_pids)
 
@@ -262,23 +262,9 @@ def train_one_epoch_adversarial(
 
             # Domain loss (cross-entropy on per-graph patient classification)
             if lambda_grl > 0 and "domain_logits" in out:
-                patient_labels = batch.patient_idx  # [N] per-node
-                batch_ids = batch.batch  # [N]
-                n_g = int(batch_ids.max().item()) + 1
-
-                # Extract one patient_idx per graph via ptr or manual
-                graph_patient = patient_labels.new_zeros(n_g)
-                if hasattr(batch, "ptr") and batch.ptr is not None:
-                    ptr = batch.ptr
-                    for gi in range(n_g):
-                        graph_patient[gi] = patient_labels[ptr[gi]]
-                else:
-                    seen = set()
-                    for ni in range(batch_ids.size(0)):
-                        gi = batch_ids[ni].item()
-                        if gi not in seen:
-                            graph_patient[gi] = patient_labels[ni]
-                            seen.add(gi)
+                # batch.patient_idx is already per-graph [B] from PyG batching
+                # (scalar Data attributes are stacked into a 1D tensor)
+                graph_patient = batch.patient_idx
 
                 domain_loss = F.cross_entropy(
                     out["domain_logits"], graph_patient.long()
