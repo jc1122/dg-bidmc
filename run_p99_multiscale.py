@@ -16,17 +16,19 @@ Each config × 3 seeds = 12 total runs.
 import json
 import os
 import sys
-import time
 import traceback
 
 import numpy as np
+import torch
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "scripts"))
 
 from graph_features import cache_split_graphs, compute_feature_dims, DEFAULT_FEATURE_CONFIG
-from train import train
+from train import train, load_cached_graphs, evaluate, optimize_threshold, build_model
+from torch_geometric.loader import DataLoader as PyGLoader
 
 SEEDS = [42, 123, 456]
+ROBUST_PP = {"threshold": 0.15, "nms_dist": 250}
 
 CONFIGS = {
     "baseline": {
@@ -84,16 +86,22 @@ def run_trial(name, feat_config, seed, patients, splits):
     print(f"Features: in_dim={in_dim}, edge_dim={edge_dim}")
     print(f"Multi-scale cutoffs: {feat_config.get('multi_scale_cutoffs')}")
 
-    # Cache graphs for this config
-    cache_dir = f"data/graphs/p99_{name}"
-    os.makedirs(cache_dir, exist_ok=True)
+    # Cache graphs per split into separate directories
+    base_dir = f"data/graphs/p99_{name}"
+    train_dir = os.path.join(base_dir, "train")
+    val_dir = os.path.join(base_dir, "val")
+    test_dir = os.path.join(base_dir, "test")
 
-    cache_split_graphs(patients, splits["train"], cache_dir, config=feat_config)
-    cache_split_graphs(patients, splits["val"], cache_dir, config=feat_config)
-    cache_split_graphs(patients, splits["test"], cache_dir, config=feat_config)
+    for d in [train_dir, val_dir, test_dir]:
+        os.makedirs(d, exist_ok=True)
+
+    cache_split_graphs(patients, splits["train"], train_dir, config=feat_config)
+    cache_split_graphs(patients, splits["val"], val_dir, config=feat_config)
+    cache_split_graphs(patients, splits["test"], test_dir, config=feat_config)
 
     # Train config
     train_config = {
+        **feat_config,
         "arch": "transformer",
         "in_dim": in_dim,
         "edge_dim": edge_dim,
@@ -115,22 +123,47 @@ def run_trial(name, feat_config, seed, patients, splits):
     }
 
     result = train(
-        train_dir=cache_dir,
-        val_dir=cache_dir,
-        test_dir=cache_dir,
-        train_ids=splits["train"],
-        val_ids=splits["val"],
-        test_ids=splits["test"],
         config=train_config,
+        train_dir=train_dir,
+        val_dir=val_dir,
+        device="cuda",
     )
 
-    val_pp = result.get("val_f1_pp", 0)
-    test_valpp = result.get("test_f1_valpp", 0)
-    test_robust = result.get("test_f1_robust", 0)
-    test_raw = result.get("test_f1_raw", result.get("test_f1", 0))
+    # --- Test evaluation ---
+    ckpt_path = os.path.join(base_dir, "checkpoints", "best_model.pt")
+    model_config = {**train_config, "in_dim": in_dim, "edge_dim": edge_dim}
+    model = build_model(model_config)
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=True)
+    model.load_state_dict(ckpt)
+    model.eval()
+    device = "cpu"
+
+    val_data = load_cached_graphs(val_dir)
+    test_data = load_cached_graphs(test_dir)
+    val_loader = PyGLoader(val_data, batch_size=32)
+    test_loader = PyGLoader(test_data, batch_size=32)
+
+    # Val-optimized PP
+    pp = optimize_threshold(model, val_loader, device, tol_samples=75)
+    val_opt_thresh, val_opt_nms = pp[0], pp[1]
+
+    val_r = evaluate(model, val_loader, device, tol_samples=75,
+                     threshold=val_opt_thresh, nms_dist=val_opt_nms)
+    test_r = evaluate(model, test_loader, device, tol_samples=75,
+                      threshold=val_opt_thresh, nms_dist=val_opt_nms)
+    test_robust = evaluate(model, test_loader, device, tol_samples=75,
+                           threshold=ROBUST_PP["threshold"],
+                           nms_dist=ROBUST_PP["nms_dist"])
+    test_raw = evaluate(model, test_loader, device, tol_samples=75,
+                        threshold=0.5, nms_dist=0)
+
+    val_pp = val_r.get("boundary_f1_600ms", 0)
+    test_valpp = test_r.get("boundary_f1_600ms", 0)
+    test_robust_f1 = test_robust.get("boundary_f1_600ms", 0)
+    test_raw_f1 = test_raw.get("boundary_f1_600ms", 0)
 
     print(f"  RESULT: val_pp={val_pp:.4f} test_valpp={test_valpp:.4f} "
-          f"test_robust={test_robust:.4f} test_raw={test_raw:.4f}")
+          f"test_robust={test_robust_f1:.4f} test_raw={test_raw_f1:.4f}")
 
     return {
         "name": f"{name}_s{seed}",
@@ -140,8 +173,8 @@ def run_trial(name, feat_config, seed, patients, splits):
         "edge_dim": edge_dim,
         "val_pp": val_pp,
         "test_valpp": test_valpp,
-        "test_robust": test_robust,
-        "test_raw": test_raw,
+        "test_robust": test_robust_f1,
+        "test_raw": test_raw_f1,
     }
 
 
