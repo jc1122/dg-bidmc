@@ -104,12 +104,16 @@ def train_fold(fold_idx, fold_train_ids, fold_val_ids, patients, feat_config,
     if len(os.listdir(val_dir)) == 0:
         cache_split_graphs(patients, fold_val_ids, val_dir, config=feat_config)
     
+    ckpt_path = os.path.join(base_dir, "checkpoints", "best_model.pt")
+    if os.path.exists(ckpt_path):
+        print(f"  Fold {fold_idx} already trained, skipping (checkpoint exists)")
+        return ckpt_path, None
+    
     in_dim, edge_dim = compute_feature_dims(feat_config)
     full_config = {**train_config, "in_dim": in_dim, "edge_dim": edge_dim, "seed": seed}
     
     result = train(config=full_config, train_dir=train_dir, val_dir=val_dir, device="cuda")
     
-    ckpt_path = os.path.join(base_dir, "checkpoints", "best_model.pt")
     return ckpt_path, result
 
 
@@ -185,8 +189,7 @@ def ensemble_evaluate(ckpt_paths, test_dir, train_config, feat_config, tol_sampl
             pred_scores = gr['scores'][mask]
             
             if len(pred_bars) > 0 and nms_dist > 0:
-                keep = nms_1d(pred_bars, pred_scores, nms_dist)
-                pred_bars = pred_bars[keep]
+                pred_bars = nms_1d(pred_bars, pred_scores, nms_dist)
             
             gt_bars = gr['bars'][gr['y'] > 0.5]
             if len(gt_bars) == 0:
